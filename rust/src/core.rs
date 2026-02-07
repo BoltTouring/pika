@@ -2,6 +2,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 use std::time::Duration;
 
+use base64::Engine as _;
 use flume::Sender;
 
 use crate::actions::AppAction;
@@ -370,7 +371,6 @@ impl AppCore {
                 error,
             } => {
                 let network_enabled = self.network_enabled();
-                let group_relays = self.default_relays();
                 if let Some(err) = error {
                     self.toast(err);
                     return;
@@ -379,6 +379,17 @@ impl AppCore {
                     self.toast("Could not find peer key package (kind 443). The peer must run Pika/MDK once (publish a key package) and you must share at least one relay.".to_string());
                     return;
                 };
+                let kp_event = normalize_peer_key_package_event_for_mdk(&kp_event);
+
+                // Prefer using relays the peer advertised in their key package, but keep our
+                // defaults too so we remain reachable from our existing pool.
+                let peer_relays = extract_relays_from_key_package_event(&kp_event).unwrap_or_default();
+                let mut group_relays = self.default_relays();
+                for r in peer_relays.iter().cloned() {
+                    if !group_relays.contains(&r) {
+                        group_relays.push(r);
+                    }
+                }
                 let group_result = {
                     let Some(sess) = self.session.as_mut() else {
                         return;
@@ -386,7 +397,9 @@ impl AppCore {
 
                     // Validate peer key package before use (spec-v2).
                     if let Err(e) = sess.mdk.parse_key_package(&kp_event) {
-                        self.toast(format!("Invalid peer key package: {e}"));
+                        self.toast(format!(
+                            "Invalid peer key package: {e}. If this is a Marmot/WhiteNoise interop peer, ensure it publishes MIP-00 compliant tags (mls_protocol_version=1.0, encoding=base64)."
+                        ));
                         return;
                     }
 
@@ -419,12 +432,16 @@ impl AppCore {
 
                 // Deliver welcomes (gift-wrapped kind 444) to the peer.
                 if network_enabled {
-                    let peer_relays =
-                        extract_relays_from_key_package_event(&kp_event).unwrap_or(group_relays);
+                    let mut welcome_relays = peer_relays;
+                    for r in group_relays.clone() {
+                        if !welcome_relays.contains(&r) {
+                            welcome_relays.push(r);
+                        }
+                    }
                     self.publish_welcomes_to_peer(
                         peer_pubkey,
                         group_result.welcome_rumors,
-                        peer_relays,
+                        welcome_relays,
                     );
                 }
 
@@ -1360,9 +1377,33 @@ impl AppCore {
         if !network_enabled {
             return;
         }
+        // Ensure the client is connected to all relays referenced by joined groups.
+        // Without this, we may subscribe to #h filters but never actually see events because
+        // the relay URLs were never added to the client pool.
+        let mut needed_relays: Vec<RelayUrl> = self.all_session_relays();
+        if let Some(sess) = self.session.as_ref() {
+            for entry in sess.groups.values() {
+                if let Ok(set) = sess.mdk.get_relays(&entry.mls_group_id) {
+                    for r in set.into_iter() {
+                        if !needed_relays.contains(&r) {
+                            needed_relays.push(r);
+                        }
+                    }
+                }
+            }
+        }
+
         let Some(sess) = self.session.as_mut() else {
             return;
         };
+        let client = sess.client.clone();
+        self.runtime.block_on(async move {
+            for r in needed_relays {
+                let _ = client.add_relay(r).await;
+            }
+            client.connect().await;
+            client.wait_for_connection(Duration::from_secs(4)).await;
+        });
 
         // GiftWrap inbox subscription (kind GiftWrap, #p = me).
         if let Some(id) = &sess.giftwrap_sub {
@@ -1415,6 +1456,12 @@ impl AppCore {
         };
         let client = sess.client.clone();
         self.runtime.spawn(async move {
+            for r in relays.iter().cloned() {
+                let _ = client.add_relay(r).await;
+            }
+            client.connect().await;
+            client.wait_for_connection(Duration::from_secs(4)).await;
+
             let expires = Timestamp::from_secs(Timestamp::now().as_secs() + 30 * 24 * 60 * 60);
             let tags = vec![Tag::expiration(expires)];
             for rumor in welcome_rumors {
@@ -1804,6 +1851,90 @@ fn extract_relays_from_key_package_event(event: &Event) -> Option<Vec<RelayUrl>>
         }
     }
     None
+}
+
+// Best-effort compatibility for peers publishing legacy/interop keypackages:
+// - protocol version "1" instead of "1.0"
+// - ciphersuite "1" instead of "0x0001"
+// - missing encoding tag + hex-encoded content instead of base64
+//
+// This does NOT re-sign the event; MDK doesn't require Nostr signature verification for
+// keypackage parsing, but it does validate the credential identity matches `event.pubkey`.
+fn normalize_peer_key_package_event_for_mdk(event: &Event) -> Event {
+    let mut out = event.clone();
+
+    // Determine if content looks like hex. Some interop stacks omit the encoding tag and use hex.
+    let content_is_hex = {
+        let s = out.content.trim();
+        !s.is_empty()
+            && (s.len() % 2 == 0)
+            && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F'))
+    };
+
+    let mut encoding_value: Option<String> = None;
+    for t in out.tags.iter() {
+        if t.kind() == TagKind::Custom("encoding".into()) {
+            if let Some(v) = t.as_slice().get(1) {
+                encoding_value = Some(v.to_string());
+            }
+        }
+    }
+
+    let mut tags: Vec<Tag> = Vec::new();
+    let mut saw_encoding = false;
+    for t in out.tags.iter() {
+        let kind = t.kind();
+        if kind == TagKind::MlsProtocolVersion {
+            let v = t.as_slice().get(1).map(|s| s.as_str()).unwrap_or("");
+            if v == "1" {
+                tags.push(Tag::custom(TagKind::MlsProtocolVersion, ["1.0"]));
+                continue;
+            }
+        }
+        if kind == TagKind::MlsCiphersuite {
+            let v = t.as_slice().get(1).map(|s| s.as_str()).unwrap_or("");
+            if v == "1" {
+                tags.push(Tag::custom(TagKind::MlsCiphersuite, ["0x0001"]));
+                continue;
+            }
+        }
+        if kind == TagKind::Custom("encoding".into()) {
+            saw_encoding = true;
+            // We'll rewrite to base64 if we convert from hex below.
+            // Otherwise keep the original tag.
+            tags.push(t.clone());
+            continue;
+        }
+        tags.push(t.clone());
+    }
+
+    // Convert legacy hex -> base64 and force encoding tag.
+    // Prefer explicit encoding=hex, but also accept missing encoding when content looks hex.
+    let encoding_is_hex = encoding_value
+        .as_deref()
+        .map(|s| s.eq_ignore_ascii_case("hex"))
+        .unwrap_or(false);
+    if encoding_is_hex || (!saw_encoding && content_is_hex) {
+        if let Ok(bytes) = hex::decode(out.content.trim()) {
+            out.content = base64::engine::general_purpose::STANDARD.encode(bytes);
+
+            // Replace/insert encoding tag to base64.
+            tags.retain(|t| t.kind() != TagKind::Custom("encoding".into()));
+            tags.push(Tag::custom(
+                TagKind::Custom("encoding".into()),
+                ["base64"],
+            ));
+        }
+    } else if !saw_encoding {
+        // MDK requires an explicit encoding tag; default to base64 for modern clients.
+        tags.push(Tag::custom(
+            TagKind::Custom("encoding".into()),
+            ["base64"],
+        ));
+    }
+
+    out.tags = tags.into_iter().collect();
+    out
 }
 
 fn referenced_key_package_event_id(rumor: &UnsignedEvent) -> Option<EventId> {
