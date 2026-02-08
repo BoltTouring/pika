@@ -367,6 +367,7 @@ impl AppCore {
             }
             InternalEvent::PeerKeyPackageFetched {
                 peer_pubkey,
+                candidate_kp_relays,
                 key_package_event,
                 error,
             } => {
@@ -383,8 +384,18 @@ impl AppCore {
 
                 // Prefer using relays the peer advertised in their key package, but keep our
                 // defaults too so we remain reachable from our existing pool.
-                let peer_relays = extract_relays_from_key_package_event(&kp_event).unwrap_or_default();
+                //
+                // Interop note: some peers only advertise relays via kind 10051 (MLS Key Package
+                // Relays) and do not duplicate relay tags onto the kind 443 itself. Preserve the
+                // relays we used to fetch the key package so we can include them in the group.
+                let peer_relays =
+                    extract_relays_from_key_package_event(&kp_event).unwrap_or_default();
                 let mut group_relays = self.default_relays();
+                for r in candidate_kp_relays.iter().cloned() {
+                    if !group_relays.contains(&r) {
+                        group_relays.push(r);
+                    }
+                }
                 for r in peer_relays.iter().cloned() {
                     if !group_relays.contains(&r) {
                         group_relays.push(r);
@@ -433,6 +444,11 @@ impl AppCore {
                 // Deliver welcomes (gift-wrapped kind 444) to the peer.
                 if network_enabled {
                     let mut welcome_relays = peer_relays;
+                    for r in candidate_kp_relays {
+                        if !welcome_relays.contains(&r) {
+                            welcome_relays.push(r);
+                        }
+                    }
                     for r in group_relays.clone() {
                         if !welcome_relays.contains(&r) {
                             welcome_relays.push(r);
@@ -563,7 +579,9 @@ impl AppCore {
                 });
 
                 if let Err(e) = self.start_session(keys) {
-                    self.toast(format!("Create account failed: {e}"));
+                    // Include the full anyhow context chain; this is critical for diagnosing
+                    // keyring/SQLCipher issues on iOS.
+                    self.toast(format!("Create account failed: {e:#}"));
                     return;
                 }
 
@@ -583,7 +601,7 @@ impl AppCore {
                     }
                 };
                 if let Err(e) = self.start_session(keys) {
-                    self.toast(format!("Login failed: {e}"));
+                    self.toast(format!("Login failed: {e:#}"));
                     return;
                 }
                 self.toast("Logged in");
@@ -796,6 +814,7 @@ impl AppCore {
                             let _ = tx.send(CoreMsg::Internal(Box::new(
                                 InternalEvent::PeerKeyPackageFetched {
                                     peer_pubkey,
+                                    candidate_kp_relays: candidate_kp_relays.clone(),
                                     key_package_event: best,
                                     error: None,
                                 },
@@ -805,6 +824,7 @@ impl AppCore {
                             let _ = tx.send(CoreMsg::Internal(Box::new(
                                 InternalEvent::PeerKeyPackageFetched {
                                     peer_pubkey,
+                                    candidate_kp_relays: candidate_kp_relays.clone(),
                                     key_package_event: None,
                                     error: Some(format!("Fetch peer key package failed: {e}")),
                                 },
@@ -1877,9 +1897,7 @@ fn normalize_peer_key_package_event_for_mdk(event: &Event) -> Event {
     // Determine if content looks like hex. Some interop stacks omit the encoding tag and use hex.
     let content_is_hex = {
         let s = out.content.trim();
-        !s.is_empty()
-            && (s.len() % 2 == 0)
-            && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F'))
+        !s.is_empty() && s.len().is_multiple_of(2) && s.bytes().all(|b| b.is_ascii_hexdigit())
     };
 
     let mut encoding_value: Option<String> = None;
@@ -1931,17 +1949,11 @@ fn normalize_peer_key_package_event_for_mdk(event: &Event) -> Event {
 
             // Replace/insert encoding tag to base64.
             tags.retain(|t| t.kind() != TagKind::Custom("encoding".into()));
-            tags.push(Tag::custom(
-                TagKind::Custom("encoding".into()),
-                ["base64"],
-            ));
+            tags.push(Tag::custom(TagKind::Custom("encoding".into()), ["base64"]));
         }
     } else if !saw_encoding {
         // MDK requires an explicit encoding tag; default to base64 for modern clients.
-        tags.push(Tag::custom(
-            TagKind::Custom("encoding".into()),
-            ["base64"],
-        ));
+        tags.push(Tag::custom(TagKind::Custom("encoding".into()), ["base64"]));
     }
 
     out.tags = tags.into_iter().collect();

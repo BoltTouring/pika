@@ -12,7 +12,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 # Fail fast if iOS Simulator runtimes/devices are missing.
-udid="$(./tools/ios-sim-ensure | sed -n 's/^ok: ios simulator ready (udid=\\(.*\\))$/\\1/p')"
+udid="$(./tools/ios-sim-ensure | sed -n 's/^ok: ios simulator ready (udid=\(.*\))$/\1/p')"
 if [ -z "${udid:-}" ]; then
   echo "error: could not determine simulator udid" >&2
   exit 1
@@ -28,6 +28,62 @@ fi
 
 echo "installing app to simulator: $udid"
 ./tools/simctl install "$udid" "$app_path"
+
+maybe_write_config() {
+  # Dev-friendly defaults:
+  # - If no relay env vars are provided, we write a default relay config that works with
+  #   the deployed OpenClaw/Marmot bot (public relays + separate key-package relays).
+  #
+  # Override:
+  #   PIKA_RELAY_URLS="ws://127.0.0.1:18080" just run-ios
+  #   PIKA_KEY_PACKAGE_RELAY_URLS="wss://..." just run-ios
+  #
+  # Disable:
+  #   PIKA_NO_RELAY_OVERRIDE=1 just run-ios
+  #
+  # iOS passes `applicationSupportDirectory` as Rust `data_dir`, so we write:
+  #   <app data container>/Library/Application Support/pika_config.json
+  if [ "${PIKA_NO_RELAY_OVERRIDE:-0}" = "1" ]; then
+    return 0
+  fi
+
+  local relays="${PIKA_RELAY_URLS:-${PIKA_RELAY_URL:-}}"
+  local kp_relays="${PIKA_KEY_PACKAGE_RELAY_URLS:-${PIKA_KP_RELAY_URLS:-}}"
+
+  # Defaults aimed at quick-start interop with the deployed Rust bot.
+  if [ -z "${relays:-}" ]; then
+    relays="wss://relay.primal.net,wss://nos.lol,wss://relay.damus.io"
+  fi
+  if [ -z "${kp_relays:-}" ]; then
+    kp_relays="wss://nostr-pub.wellorder.net,wss://nostr-01.yakihonne.com,wss://nostr-02.yakihonne.com,wss://relay.satlantis.io"
+  fi
+
+  local json
+  json="$(
+    python3 - <<PY
+import json
+relays = "${relays}".strip()
+kp_relays = "${kp_relays}".strip()
+relay_items = [x.strip() for x in relays.split(",") if x.strip()]
+kp_items = [x.strip() for x in kp_relays.split(",") if x.strip()]
+print(json.dumps({"disable_network": False, "relay_urls": relay_items, "key_package_relay_urls": kp_items}))
+PY
+  )"
+
+  local container support_dir
+  container="$(./tools/simctl get_app_container "$udid" com.pika.app data 2>/dev/null | tr -d '\r' | tail -n 1)"
+  if [ -z "${container:-}" ] || [ ! -d "$container" ]; then
+    echo "error: failed to locate simulator app container for com.pika.app (udid=$udid)" >&2
+    exit 1
+  fi
+
+  support_dir="$container/Library/Application Support"
+  mkdir -p "$support_dir"
+  printf '%s' "$json" >"$support_dir/pika_config.json"
+  echo "wrote relay override to: $support_dir/pika_config.json"
+}
+
+maybe_write_config
 
 echo "launching com.pika.app"
 ./tools/simctl launch "$udid" com.pika.app

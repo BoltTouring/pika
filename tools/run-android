@@ -66,12 +66,30 @@ maybe_setup_adb_reverse() {
 maybe_setup_adb_reverse
 
 maybe_write_config() {
-  # Optional dev-only relay override:
+  # Dev-friendly defaults:
+  # - If no relay env vars are provided, we write a default relay config that works with
+  #   the deployed OpenClaw/Marmot bot (public relays + separate key-package relays).
+  #
+  # Override:
   #   PIKA_RELAY_URLS="ws://10.0.2.2:18080" just run-android
+  #   PIKA_KEY_PACKAGE_RELAY_URLS="wss://..." just run-android
+  #
+  # Disable:
+  #   PIKA_NO_RELAY_OVERRIDE=1 just run-android
   # This writes `pika_config.json` into the app sandbox via `run-as` (debug builds only).
-  local relays="${PIKA_RELAY_URLS:-${PIKA_RELAY_URL:-}}"
-  if [ -z "${relays:-}" ]; then
+  if [ "${PIKA_NO_RELAY_OVERRIDE:-0}" = "1" ]; then
     return 0
+  fi
+
+  local relays="${PIKA_RELAY_URLS:-${PIKA_RELAY_URL:-}}"
+  local kp_relays="${PIKA_KEY_PACKAGE_RELAY_URLS:-${PIKA_KP_RELAY_URLS:-}}"
+
+  # Defaults aimed at quick-start interop with the deployed Rust bot.
+  if [ -z "${relays:-}" ]; then
+    relays="wss://relay.primal.net,wss://nos.lol,wss://relay.damus.io"
+  fi
+  if [ -z "${kp_relays:-}" ]; then
+    kp_relays="wss://nostr-pub.wellorder.net,wss://nostr-01.yakihonne.com,wss://nostr-02.yakihonne.com,wss://relay.satlantis.io"
   fi
 
   # Comma-separated list -> JSON array.
@@ -80,36 +98,27 @@ maybe_write_config() {
     python3 - <<PY
 import json
 relays = "${relays}".strip()
-items = [x.strip() for x in relays.split(",") if x.strip()]
-print(json.dumps({"relay_urls": items, "key_package_relay_urls": items}))
+kp_relays = "${kp_relays}".strip()
+relay_items = [x.strip() for x in relays.split(",") if x.strip()]
+kp_items = [x.strip() for x in kp_relays.split(",") if x.strip()]
+print(json.dumps({"disable_network": False, "relay_urls": relay_items, "key_package_relay_urls": kp_items}))
 PY
   )"
 
   echo "writing relay override to app config (pika_config.json)"
   "$ADB" -s "$SERIAL" shell am force-stop com.pika.app >/dev/null 2>&1 || true
 
-  # Write via /data/local/tmp then copy into the app sandbox. This avoids fragile quoting and
-  # ensures we write exactly `${filesDir}/pika_config.json` (Rust uses `data_dir/pika_config.json`,
-  # and Android passes `context.filesDir` as `data_dir`).
-  tmp_remote="/data/local/tmp/pika_config.json"
-  printf '%s' "$json" | "$ADB" -s "$SERIAL" shell "cat > '$tmp_remote'"
-
-  # Copy into the app's filesDir (debug builds allow `run-as`).
-  #
-  # Note: `run-as` does not reliably set `$HOME`; use absolute app paths instead.
-  "$ADB" -s "$SERIAL" shell "run-as com.pika.app sh -c '
-    set -e
-    if cp \"${tmp_remote}\" /data/user/0/com.pika.app/files/pika_config.json 2>/dev/null; then
-      cat /data/user/0/com.pika.app/files/pika_config.json >/dev/null
-      exit 0
-    fi
-    if cp \"${tmp_remote}\" /data/data/com.pika.app/files/pika_config.json 2>/dev/null; then
-      cat /data/data/com.pika.app/files/pika_config.json >/dev/null
-      exit 0
-    fi
-    echo \"error: could not write app config via run-as\" >&2
+  # Write directly into the app sandbox via `run-as` (most reliable on emulators/devices).
+  # `files/pika_config.json` resolves to the same directory Android passes as `data_dir`.
+  if ! printf '%s' "$json" | "$ADB" -s "$SERIAL" shell "run-as com.pika.app sh -c 'mkdir -p files && cat > files/pika_config.json'"; then
+    echo "error: could not write app config via run-as" >&2
+    echo "debug: run-as output:" >&2
+    "$ADB" -s "$SERIAL" shell "run-as com.pika.app id" >&2 || true
+    echo "hint: ensure you're running a debuggable build; if you previously installed a non-debuggable variant, run: adb uninstall com.pika.app" >&2
     exit 1
-  '"
+  fi
+  # Verify read-back.
+  "$ADB" -s "$SERIAL" shell "run-as com.pika.app sh -c 'cat files/pika_config.json >/dev/null'" >/dev/null
 }
 
 maybe_write_config

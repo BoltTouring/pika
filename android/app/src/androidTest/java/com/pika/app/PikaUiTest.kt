@@ -7,6 +7,7 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -58,7 +59,13 @@ class PikaUiTest {
         Log.d("PikaUiTest", "myNpub=$myNpub")
 
         compose.onNodeWithContentDescription("New Chat").performClick()
-        compose.onNodeWithText("New chat").assertIsDisplayed()
+        // Material3 TopAppBar title semantics can be present but not "displayed" per test
+        // semantics; the peer input field is a better screen-ready signal.
+        compose.waitUntil(30_000) {
+            runCatching {
+                compose.onAllNodesWithTag(TestTags.NEWCHAT_PEER_NPUB).fetchSemanticsNodes().isNotEmpty()
+            }.getOrDefault(false)
+        }
 
         compose.onNodeWithTag(TestTags.NEWCHAT_PEER_NPUB).performTextInput(myNpub)
         compose.waitForIdle()

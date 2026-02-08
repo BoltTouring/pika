@@ -17,3 +17,6 @@ ios/Frameworks/
 .android-emulator-home/
 .direnv/
 emulator.log
+
+.worktrees
+worktrees

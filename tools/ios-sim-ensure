@@ -22,9 +22,33 @@ if [ -z "$("$SIMCTL" list runtimes | sed -n '2,$p' | tr -d '[:space:]')" ]; then
   exit 1
 fi
 
-runtime_id="$("$SIMCTL" list runtimes | awk -F '[()]' '/^iOS / {print $2}' | tail -n 1)"
+# Pick the latest available iOS runtime identifier. `simctl list runtimes` prints both
+# a human-readable version/build in parentheses and the identifier after " - ".
+# Example:
+#   iOS 18.6 (18.6 - 22G86) - com.apple.CoreSimulator.SimRuntime.iOS-18-6
+runtime_id="$(
+  "$SIMCTL" list -j runtimes | python3 -c '
+import json,sys,re
+j=json.load(sys.stdin)
+r=[]
+for rt in j.get("runtimes",[]):
+  ident=rt.get("identifier") or ""
+  name=rt.get("name") or ""
+  avail=rt.get("isAvailable")
+  if not name.startswith("iOS "):
+    continue
+  if avail is False:
+    continue
+  m=re.search(r"iOS-(\d+)-(\d+)$", ident)
+  if not m:
+    continue
+  r.append((int(m.group(1)), int(m.group(2)), ident))
+r.sort()
+sys.stdout.write(r[-1][2] if r else "")
+'
+)"
 if [ -z "${runtime_id:-}" ]; then
-  echo "error: Failed to determine an iOS runtime id from simctl." >&2
+  echo "error: Failed to determine an iOS runtime identifier from simctl." >&2
   "$SIMCTL" list runtimes >&2 || true
   exit 1
 fi
@@ -41,7 +65,7 @@ if [ -z "${device_type_id:-}" ]; then
 fi
 
 device_name="Pika iPhone 15"
-udid="$("$SIMCTL" list devices | awk -v name="$device_name" '$0 ~ name {print $NF; exit}')"
+udid="$("$SIMCTL" list devices | awk -F '[()]' -v name="$device_name" '$0 ~ name {print $2; exit}')"
 if [ -z "${udid:-}" ]; then
   udid="$("$SIMCTL" create "$device_name" "$device_type_id" "$runtime_id" | tr -d '[:space:]')"
   echo "created simulator: $device_name ($udid)"

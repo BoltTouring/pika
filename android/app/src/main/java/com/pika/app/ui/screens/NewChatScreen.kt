@@ -25,13 +25,17 @@ import com.pika.app.AppManager
 import com.pika.app.rust.AppAction
 import com.pika.app.rust.Screen
 import com.pika.app.ui.TestTags
+import com.pika.app.ui.PeerKeyValidator
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material3.MaterialTheme
 
 @Composable
 @OptIn(ExperimentalMaterial3Api::class)
 fun NewChatScreen(manager: AppManager, padding: PaddingValues) {
     var npub by remember { mutableStateOf("") }
+    val peer = npub.trim()
+    val isValidPeer = PeerKeyValidator.isValidPeer(peer)
 
     Scaffold(
         modifier = Modifier.padding(padding),
@@ -60,10 +64,18 @@ fun NewChatScreen(manager: AppManager, padding: PaddingValues) {
                 onValueChange = { npub = it },
                 label = { Text("Peer npub") },
                 singleLine = true,
+                isError = peer.isNotEmpty() && !isValidPeer,
                 modifier = Modifier.fillMaxWidth().testTag(TestTags.NEWCHAT_PEER_NPUB),
             )
+            if (peer.isNotEmpty() && !isValidPeer) {
+                Text(
+                    "Enter a valid npub1… or 64-char hex pubkey.",
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
             Button(
-                onClick = { manager.dispatch(AppAction.CreateChat(npub.trim())) },
+                onClick = { manager.dispatch(AppAction.CreateChat(peer)) },
+                enabled = isValidPeer,
                 modifier = Modifier.fillMaxWidth().testTag(TestTags.NEWCHAT_START),
             ) {
                 Text("Start chat")

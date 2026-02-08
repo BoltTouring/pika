@@ -11,10 +11,50 @@ final class AppManager: AppReconciler {
     private let nsecStore = KeychainNsecStore()
 
     init() {
-        let dataDir = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)
-            .first!
-            .path
+        let fm = FileManager.default
+        let dataDirUrl = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let dataDir = dataDirUrl.path
+
+        // UI tests need a clean slate and a way to inject relay overrides without relying on
+        // external scripts.
+        let env = ProcessInfo.processInfo.environment
+        if env["PIKA_UI_TEST_RESET"] == "1" {
+            nsecStore.clearNsec()
+            try? fm.removeItem(at: dataDirUrl)
+        }
+        try? fm.createDirectory(at: dataDirUrl, withIntermediateDirectories: true)
+
+        // Optional relay override (matches `tools/run-ios` environment variables).
+        let relays = (env["PIKA_RELAY_URLS"] ?? env["PIKA_RELAY_URL"])?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let kpRelays = (env["PIKA_KEY_PACKAGE_RELAY_URLS"] ?? env["PIKA_KP_RELAY_URLS"])?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !relays.isEmpty || !kpRelays.isEmpty {
+            let relayItems = relays
+                .split(separator: ",")
+                .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            var kpItems = kpRelays
+                .split(separator: ",")
+                .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+
+            // Default key-package relays to the general relay list if not specified.
+            if kpItems.isEmpty {
+                kpItems = relayItems
+            }
+
+            let obj: [String: Any] = [
+                // Ensure tests/dev overrides can re-enable networking even if a prior run wrote
+                // `disable_network=true` into `pika_config.json`.
+                "disable_network": false,
+                "relay_urls": relayItems,
+                "key_package_relay_urls": kpItems,
+            ]
+
+            if let data = try? JSONSerialization.data(withJSONObject: obj, options: []) {
+                let path = dataDirUrl.appendingPathComponent("pika_config.json")
+                try? data.write(to: path, options: .atomic)
+            }
+        }
 
         let rust = FfiApp(dataDir: dataDir)
         self.rust = rust

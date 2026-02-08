@@ -6,30 +6,33 @@ struct ContentView: View {
 
     var body: some View {
         let router = manager.state.router
-        switch router.defaultScreen {
-        case .login:
-            LoginView(manager: manager)
-        default:
-            NavigationStack(path: $manager.state.router.screenStack) {
-                screenView(manager: manager, screen: router.defaultScreen)
-                    .navigationDestination(for: Screen.self) { screen in
-                        screenView(manager: manager, screen: screen)
+        Group {
+            switch router.defaultScreen {
+            case .login:
+                LoginView(manager: manager)
+            default:
+                NavigationStack(path: $manager.state.router.screenStack) {
+                    screenView(manager: manager, screen: router.defaultScreen)
+                        .navigationDestination(for: Screen.self) { screen in
+                            screenView(manager: manager, screen: screen)
+                        }
+                }
+                .onChange(of: manager.state.router.screenStack) { old, new in
+                    // Only report platform-initiated pops.
+                    if new.count < old.count {
+                        manager.dispatch(.updateScreenStack(stack: new))
                     }
-            }
-            .onChange(of: manager.state.router.screenStack) { old, new in
-                // Only report platform-initiated pops.
-                if new.count < old.count {
-                    manager.dispatch(.updateScreenStack(stack: new))
                 }
             }
-            .onChange(of: manager.state.toast) { _, new in
-                showToastAlert = (new != nil)
-            }
-            .alert("Pika", isPresented: $showToastAlert) {
-                Button("OK") { manager.dispatch(.clearToast) }
-            } message: {
-                Text(manager.state.toast ?? "")
-            }
+        }
+        // Toasts should be visible even on the Login screen (e.g. invalid nsec, create account failure).
+        .onChange(of: manager.state.toast) { _, new in
+            showToastAlert = (new != nil)
+        }
+        .alert("Pika", isPresented: $showToastAlert) {
+            Button("OK") { manager.dispatch(.clearToast) }
+        } message: {
+            Text(manager.state.toast ?? "")
         }
     }
 }

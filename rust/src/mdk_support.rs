@@ -77,8 +77,91 @@ pub fn open_mdk(data_dir: &str, pubkey: &PublicKey) -> Result<PikaMdk> {
             .with_context(|| format!("create mdk db dir: {}", parent.display()))?;
     }
 
-    let storage = MdkSqliteStorage::new(&db_path, SERVICE_ID, &db_key_id(&pubkey_hex))
-        .with_context(|| format!("open encrypted mdk sqlite db: {}", db_path.display()))?;
+    let storage = match MdkSqliteStorage::new(&db_path, SERVICE_ID, &db_key_id(&pubkey_hex)) {
+        Ok(storage) => storage,
+        Err(e) => {
+            // On iOS simulator, keychain operations can fail if the app is not provisioned
+            // with the necessary entitlements. For dev/QA we fall back to an app-sandbox
+            // file-based key to keep MLS state encrypted-at-rest without Keychain.
+            #[cfg(all(target_os = "ios", target_env = "sim"))]
+            {
+                use mdk_sqlite_storage::error::Error as MdkErr;
+                if matches!(e, MdkErr::Keyring(_) | MdkErr::KeyringNotInitialized(_)) {
+                    tracing::warn!(
+                        "mdk keyring-backed storage failed on iOS; falling back to file key: {e}"
+                    );
+                    return open_mdk_ios_file_key(data_dir, pubkey).with_context(|| {
+                        format!("open encrypted mdk sqlite db: {}", db_path.display())
+                    });
+                }
+            }
+
+            Err(e)
+                .with_context(|| format!("open encrypted mdk sqlite db: {}", db_path.display()))?
+        }
+    };
+
+    Ok(MDK::builder(storage)
+        .with_config(MdkConfig::default())
+        .build())
+}
+
+#[cfg(all(target_os = "ios", target_env = "sim"))]
+fn open_mdk_ios_file_key(data_dir: &str, pubkey: &PublicKey) -> Result<PikaMdk> {
+    let pubkey_hex = pubkey.to_hex();
+    let db_path = mdk_db_path(data_dir, &pubkey_hex);
+    let key_path = Path::new(data_dir)
+        .join("mls")
+        .join(&pubkey_hex)
+        .join("mdk.db.key");
+
+    if let Some(parent) = key_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create mdk key dir: {}", parent.display()))?;
+    }
+
+    let key: [u8; 32] = if key_path.exists() {
+        let bytes = std::fs::read(&key_path)
+            .with_context(|| format!("read mdk file key: {}", key_path.display()))?;
+        bytes.as_slice().try_into().map_err(|_| {
+            anyhow!(
+                "invalid mdk file key length: expected 32 bytes, got {}",
+                bytes.len()
+            )
+        })?
+    } else {
+        use rand::rngs::OsRng;
+        use rand::RngCore;
+
+        let mut k = [0u8; 32];
+        OsRng.fill_bytes(&mut k);
+        std::fs::write(&key_path, &k)
+            .with_context(|| format!("write mdk file key: {}", key_path.display()))?;
+        // Best-effort hardening; iOS sandbox is the primary boundary.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600));
+        }
+        k
+    };
+
+    // If a previous attempt created an empty DB file (e.g., keyring failure mid-init),
+    // remove it so we can initialize encrypted storage cleanly.
+    if let Ok(meta) = std::fs::metadata(&db_path) {
+        if meta.len() == 0 {
+            let _ = std::fs::remove_file(&db_path);
+        }
+    }
+
+    let storage =
+        MdkSqliteStorage::new_with_key(&db_path, mdk_sqlite_storage::EncryptionConfig::new(key))
+            .with_context(|| {
+                format!(
+                    "open encrypted mdk sqlite db with file key: {}",
+                    db_path.display()
+                )
+            })?;
 
     Ok(MDK::builder(storage)
         .with_config(MdkConfig::default())

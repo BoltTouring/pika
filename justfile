@@ -58,6 +58,19 @@ android-ui-test: gen-kotlin android-rust android-local-properties
   # Requires a running emulator/device (instrumentation tests).
   cd android && ./gradlew :app:connectedDebugAndroidTest
 
+# Opt-in E2E: runs against public relays + deployed OpenClaw rust marmot bot.
+# This is intentionally NOT part of `just qa` because it is nondeterministic by nature.
+android-ui-e2e: gen-kotlin android-rust android-local-properties
+  # Requires a running emulator/device.
+  cd android && ./gradlew :app:connectedDebugAndroidTest \
+    -Pandroid.testInstrumentationRunnerArguments.class=com.pika.app.PikaE2eUiTest \
+    -Pandroid.testInstrumentationRunnerArguments.pika_e2e=1 \
+    -Pandroid.testInstrumentationRunnerArguments.pika_disable_network=false \
+    -Pandroid.testInstrumentationRunnerArguments.pika_reset=1 \
+    -Pandroid.testInstrumentationRunnerArguments.pika_peer_npub=1ac66317246750fe862cf47156b200051aa219d9a37ca018690bb3483065d3b8 \
+    -Pandroid.testInstrumentationRunnerArguments.pika_relay_urls=wss://relay.primal.net,wss://nos.lol,wss://relay.damus.io \
+    -Pandroid.testInstrumentationRunnerArguments.pika_key_package_relay_urls=wss://nostr-pub.wellorder.net,wss://nostr-01.yakihonne.com,wss://nostr-02.yakihonne.com,wss://relay.satlantis.io
+
 # iOS (Xcode build happens outside Nix; Nix helps with Rust + xcodegen).
 ios-gen-swift: rust-build-host
   mkdir -p ios/Bindings
@@ -71,9 +84,9 @@ ios-rust:
   set -euo pipefail; \
   DEV_DIR=$(ls -d /Applications/Xcode*.app/Contents/Developer 2>/dev/null | sort | tail -n 1); \
   if [ -z "$DEV_DIR" ]; then echo "Xcode not found under /Applications (needed for iOS SDK)"; exit 1; fi; \
-  env -u LIBRARY_PATH DEVELOPER_DIR="$DEV_DIR" RUSTFLAGS="-C link-arg=-miphoneos-version-min=17.0" cargo build -p pika_core --release --target aarch64-apple-ios; \
-  env -u LIBRARY_PATH DEVELOPER_DIR="$DEV_DIR" RUSTFLAGS="-C link-arg=-mios-simulator-version-min=17.0" cargo build -p pika_core --release --target aarch64-apple-ios-sim; \
-  env -u LIBRARY_PATH DEVELOPER_DIR="$DEV_DIR" RUSTFLAGS="-C link-arg=-mios-simulator-version-min=17.0" cargo build -p pika_core --release --target x86_64-apple-ios
+  env -u LIBRARY_PATH DEVELOPER_DIR="$DEV_DIR" RUSTFLAGS="-C link-arg=-miphoneos-version-min=17.0" cargo build -p pika_core --release --lib --target aarch64-apple-ios; \
+  env -u LIBRARY_PATH DEVELOPER_DIR="$DEV_DIR" RUSTFLAGS="-C link-arg=-mios-simulator-version-min=17.0" cargo build -p pika_core --release --lib --target aarch64-apple-ios-sim; \
+  env -u LIBRARY_PATH DEVELOPER_DIR="$DEV_DIR" RUSTFLAGS="-C link-arg=-mios-simulator-version-min=17.0" cargo build -p pika_core --release --lib --target x86_64-apple-ios
 
 ios-xcframework: ios-gen-swift ios-rust
   rm -rf ios/Frameworks/PikaCore.xcframework ios/.build
@@ -99,19 +112,27 @@ ios-build-sim: ios-xcframework ios-xcodeproj
   if [ -z "$DEV_DIR" ]; then echo "Xcode not found under /Applications"; exit 1; fi; \
   env -u LD -u CC -u CXX DEVELOPER_DIR="$DEV_DIR" xcodebuild -project ios/Pika.xcodeproj -target Pika -configuration Debug -sdk iphonesimulator build CODE_SIGNING_ALLOWED=NO
 
-# Requires at least one installed iOS Simulator runtime + device.
-# If `./tools/simctl list runtimes` is empty, install a simulator runtime via:
-# Xcode -> Settings -> Platforms -> iOS Simulator (download), then retry.
-IOS_DESTINATION := "platform=iOS Simulator,name=iPhone 15"
 ios-ui-test: ios-xcframework ios-xcodeproj
   DEV_DIR=$(ls -d /Applications/Xcode*.app/Contents/Developer 2>/dev/null | sort | tail -n 1); \
   if [ -z "$DEV_DIR" ]; then echo "Xcode not found under /Applications"; exit 1; fi; \
-  if [ -z "$(./tools/simctl list runtimes | tail -n +2 | tr -d '[:space:]')" ]; then \
-    echo "No iOS Simulator runtimes installed (simctl list runtimes is empty)."; \
-    echo "Install one via: Xcode -> Settings -> Platforms -> iOS Simulator (download)"; \
-    exit 1; \
-  fi; \
-  env -u LD -u CC -u CXX DEVELOPER_DIR="$DEV_DIR" xcodebuild -project ios/Pika.xcodeproj -scheme Pika -destination "{{IOS_DESTINATION}}" test CODE_SIGNING_ALLOWED=NO
+  udid="$(./tools/ios-sim-ensure | sed -n 's/^ok: ios simulator ready (udid=\(.*\))$/\1/p')"; \
+  if [ -z "$udid" ]; then echo "error: could not determine simulator udid"; exit 1; fi; \
+  env -u LD -u CC -u CXX DEVELOPER_DIR="$DEV_DIR" xcodebuild -project ios/Pika.xcodeproj -scheme Pika -destination "id=$udid" test CODE_SIGNING_ALLOWED=NO \
+    -skip-testing:PikaUITests/PikaUITests/testE2E_deployedRustBot_pingPong
+
+# Opt-in E2E: runs the XCUITest that hits public relays + deployed OpenClaw rust marmot bot.
+# Enable by setting PIKA_UI_E2E=1 (and optional overrides).
+ios-ui-e2e: ios-xcframework ios-xcodeproj
+  DEV_DIR=$(ls -d /Applications/Xcode*.app/Contents/Developer 2>/dev/null | sort | tail -n 1); \
+  if [ -z "$DEV_DIR" ]; then echo "Xcode not found under /Applications"; exit 1; fi; \
+  udid="$(./tools/ios-sim-ensure | sed -n 's/^ok: ios simulator ready (udid=\(.*\))$/\1/p')"; \
+  if [ -z "$udid" ]; then echo "error: could not determine simulator udid"; exit 1; fi; \
+  PIKA_UI_E2E=1 \
+    PIKA_UI_E2E_BOT_NPUB="npub1rtrxx9eyvag0ap3v73c4dvsqq5d2yxwe5d72qxrfpwe5svr96wuqed4p38" \
+    PIKA_UI_E2E_RELAYS="wss://relay.primal.net,wss://nos.lol,wss://relay.damus.io" \
+    PIKA_UI_E2E_KP_RELAYS="wss://nostr-pub.wellorder.net,wss://nostr-01.yakihonne.com,wss://nostr-02.yakihonne.com,wss://relay.satlantis.io" \
+    env -u LD -u CC -u CXX DEVELOPER_DIR="$DEV_DIR" xcodebuild -project ios/Pika.xcodeproj -scheme Pika -destination "id=$udid" test CODE_SIGNING_ALLOWED=NO \
+      -only-testing:PikaUITests/PikaUITests/testE2E_deployedRustBot_pingPong
 
 # Optional: device automation (npx). Not required for building.
 device:
@@ -133,3 +154,11 @@ run-ios:
 
 doctor-ios:
   ./tools/ios-runtime-doctor
+
+# Local-first interop baseline with the Rust OpenClaw-style bot (marmot-interop-lab-rust).
+# Opt-in: requires Docker and ~/code/marmot-interop-lab-rust (override with MARMOT_INTEROP_RUST_DIR).
+interop-rust-baseline:
+  ./tools/interop-rust-baseline
+
+interop-rust-manual:
+  ./tools/interop-rust-baseline --manual

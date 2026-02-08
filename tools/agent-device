@@ -21,4 +21,22 @@ if [ "${PIKA_AGENT_DEVICE_CLEAN_DAEMON:-0}" = "1" ]; then
 fi
 
 # Pin a known-good version (older globally-installed versions can be picked up by npx).
-exec npx --yes "agent-device@0.2.4" "$@"
+#
+# Two pragmatic fixes:
+# 1) Avoid Nix/direnv env vars breaking Xcode builds used by agent-device's iOS runner.
+# 2) agent-device's bundled ios-runner project has, in some published builds, an invalid
+#    deployment target (e.g. 26.0) which makes xcodebuild show only placeholder destinations.
+#
+# We keep this as a best-effort patch against npx's cached install.
+version="agent-device@0.2.4"
+
+# Ensure package is present in npx cache so we can patch it before real commands run.
+npx --yes "$version" --help >/dev/null 2>&1 || true
+
+for pbx in "$HOME/.npm/_npx"/*/node_modules/agent-device/ios-runner/AgentDeviceRunner/AgentDeviceRunner.xcodeproj/project.pbxproj; do
+  if [ -f "$pbx" ] && rg -q "IPHONEOS_DEPLOYMENT_TARGET = 26\\.0;" "$pbx" 2>/dev/null; then
+    perl -pi -e 's/\\bIPHONEOS_DEPLOYMENT_TARGET = 26\\.0;/IPHONEOS_DEPLOYMENT_TARGET = 17.0;/g' "$pbx" || true
+  fi
+done
+
+exec env -u LD -u CC -u CXX npx --yes "$version" "$@"

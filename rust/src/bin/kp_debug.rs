@@ -8,16 +8,13 @@ use nostr_sdk::prelude::*;
 
 fn looks_like_hex(s: &str) -> bool {
     let s = s.trim();
-    !s.is_empty()
-        && (s.len() % 2 == 0)
-        && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F'))
+    !s.is_empty() && s.len().is_multiple_of(2) && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -123,9 +120,7 @@ fn normalize_peer_key_package_event_for_mdk(event: &Event) -> Event {
 
     let content_is_hex = {
         let s = out.content.trim();
-        !s.is_empty()
-            && (s.len() % 2 == 0)
-            && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F'))
+        !s.is_empty() && s.len().is_multiple_of(2) && s.bytes().all(|b| b.is_ascii_hexdigit())
     };
 
     let mut encoding_value: Option<String> = None;
@@ -171,16 +166,10 @@ fn normalize_peer_key_package_event_for_mdk(event: &Event) -> Event {
         if let Ok(bytes) = hex::decode(out.content.trim()) {
             out.content = base64::engine::general_purpose::STANDARD.encode(bytes);
             tags.retain(|t| t.kind() != TagKind::Custom("encoding".into()));
-            tags.push(Tag::custom(
-                TagKind::Custom("encoding".into()),
-                ["base64"],
-            ));
+            tags.push(Tag::custom(TagKind::Custom("encoding".into()), ["base64"]));
         }
     } else if !saw_encoding {
-        tags.push(Tag::custom(
-            TagKind::Custom("encoding".into()),
-            ["base64"],
-        ));
+        tags.push(Tag::custom(TagKind::Custom("encoding".into()), ["base64"]));
     }
 
     out.tags = tags.into_iter().collect();
