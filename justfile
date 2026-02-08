@@ -162,3 +162,59 @@ interop-rust-baseline:
 
 interop-rust-manual:
   ./tools/interop-rust-baseline --manual
+
+# ── pika-cli (Marmot protocol CLI) ──────────────────────────────────────────
+
+cli-build:
+  cargo build -p pika-cli
+
+cli-release:
+  cargo build -p pika-cli --release
+
+# Show (or create) an identity in the given state dir.
+cli-identity STATE_DIR=".pika-cli" RELAY="ws://127.0.0.1:7777":
+  cargo run -p pika-cli -- --state-dir {{STATE_DIR}} --relay {{RELAY}} identity
+
+# Quick smoke test: two users, local relay, send+receive.
+# Requires a Nostr relay running at RELAY (e.g. `strfry` or `nostr-rs-relay`).
+cli-smoke RELAY="ws://127.0.0.1:7777":
+  #!/usr/bin/env bash
+  set -euo pipefail
+  TMPDIR=$(mktemp -d)
+  trap 'rm -rf "$TMPDIR"' EXIT
+  CLI="cargo run -q -p pika-cli --"
+
+  echo "=== Alice: create identity ==="
+  ALICE=$($CLI --state-dir "$TMPDIR/alice" --relay {{RELAY}} identity)
+  ALICE_PK=$(echo "$ALICE" | python3 -c "import sys,json; print(json.load(sys.stdin)['pubkey'])")
+  echo "Alice pubkey: $ALICE_PK"
+
+  echo "=== Bob: create identity ==="
+  BOB=$($CLI --state-dir "$TMPDIR/bob" --relay {{RELAY}} identity)
+  BOB_PK=$(echo "$BOB" | python3 -c "import sys,json; print(json.load(sys.stdin)['pubkey'])")
+  echo "Bob pubkey: $BOB_PK"
+
+  echo "=== Both: publish key packages ==="
+  $CLI --state-dir "$TMPDIR/alice" --relay {{RELAY}} publish-kp
+  $CLI --state-dir "$TMPDIR/bob" --relay {{RELAY}} publish-kp
+
+  echo "=== Alice: invite Bob ==="
+  INVITE=$($CLI --state-dir "$TMPDIR/alice" --relay {{RELAY}} invite --peer "$BOB_PK")
+  GROUP=$(echo "$INVITE" | python3 -c "import sys,json; print(json.load(sys.stdin)['nostr_group_id'])")
+  echo "Group: $GROUP"
+
+  echo "=== Bob: check welcomes ==="
+  WELCOMES=$($CLI --state-dir "$TMPDIR/bob" --relay {{RELAY}} welcomes)
+  echo "$WELCOMES"
+  WRAPPER=$(echo "$WELCOMES" | python3 -c "import sys,json; print(json.load(sys.stdin)['welcomes'][0]['wrapper_event_id'])")
+
+  echo "=== Bob: accept welcome ==="
+  $CLI --state-dir "$TMPDIR/bob" --relay {{RELAY}} accept-welcome --wrapper-event-id "$WRAPPER"
+
+  echo "=== Alice: send message ==="
+  $CLI --state-dir "$TMPDIR/alice" --relay {{RELAY}} send --group "$GROUP" --content "hello from alice"
+
+  echo "=== Bob: read messages ==="
+  $CLI --state-dir "$TMPDIR/bob" --relay {{RELAY}} messages --group "$GROUP"
+
+  echo "=== SMOKE TEST PASSED ==="
