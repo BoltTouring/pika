@@ -121,10 +121,23 @@ jobs:
 
   nightly-macos-ios:
     if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'nightly' && github.event.inputs.run_macos_ios == 'true')
-    runs-on: macos-15
+    runs-on: warp-macos-15-arm64-12x
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
       - uses: nixbuild/nix-quick-install-action@v30
+      - uses: DeterminateSystems/magic-nix-cache-action@v13
+      - uses: WarpBuilds/cache@v1
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
       - run: xcodebuild -version
       - run: nix develop .#default -c just rmp-nightly-macos
 
