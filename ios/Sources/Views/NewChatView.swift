@@ -2,14 +2,15 @@ import SwiftUI
 import UIKit
 
 struct NewChatView: View {
-    let manager: AppManager
+    let state: NewChatViewState
+    let onCreateChat: @MainActor (String) -> Void
     @State private var npubInput = ""
     @State private var showScanner = false
 
     var body: some View {
         let peer = PeerKeyValidator.normalize(npubInput)
         let isValidPeer = PeerKeyValidator.isValidPeer(peer)
-        let isLoading = manager.state.busy.creatingChat
+        let isLoading = state.isCreatingChat
 
         VStack(spacing: 12) {
             TextField("Peer npub", text: $npubInput)
@@ -44,7 +45,7 @@ struct NewChatView: View {
             }
 
             Button {
-                manager.dispatch(.createChat(peerNpub: peer))
+                onCreateChat(peer)
             } label: {
                 if isLoading {
                     HStack(spacing: 8) {
@@ -71,3 +72,23 @@ struct NewChatView: View {
         }
     }
 }
+
+#if DEBUG
+#Preview("New Chat") {
+    NavigationStack {
+        NewChatView(
+            state: NewChatViewState(isCreatingChat: false),
+            onCreateChat: { _ in }
+        )
+    }
+}
+
+#Preview("New Chat - Creating") {
+    NavigationStack {
+        NewChatView(
+            state: NewChatViewState(isCreatingChat: true),
+            onCreateChat: { _ in }
+        )
+    }
+}
+#endif

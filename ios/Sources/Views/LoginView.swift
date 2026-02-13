@@ -1,13 +1,14 @@
 import SwiftUI
 
 struct LoginView: View {
-    let manager: AppManager
+    let state: LoginViewState
+    let onCreateAccount: @MainActor () -> Void
+    let onLogin: @MainActor (String) -> Void
     @State private var nsecInput = ""
 
     var body: some View {
-        let busy = manager.state.busy
-        let createBusy = busy.creatingAccount
-        let loginBusy = busy.loggingIn
+        let createBusy = state.creatingAccount
+        let loginBusy = state.loggingIn
         let anyBusy = createBusy || loginBusy
 
         VStack(spacing: 16) {
@@ -15,7 +16,7 @@ struct LoginView: View {
                 .font(.largeTitle.weight(.semibold))
 
             Button {
-                manager.dispatch(.createAccount)
+                onCreateAccount()
             } label: {
                 if createBusy {
                     ProgressView()
@@ -38,7 +39,7 @@ struct LoginView: View {
                 .accessibilityIdentifier(TestIds.loginNsecInput)
 
             Button {
-                manager.login(nsec: nsecInput)
+                onLogin(nsecInput)
             } label: {
                 if loginBusy {
                     ProgressView()
@@ -53,3 +54,29 @@ struct LoginView: View {
         .padding(20)
     }
 }
+
+#if DEBUG
+#Preview("Login") {
+    LoginView(
+        state: LoginViewState(creatingAccount: false, loggingIn: false),
+        onCreateAccount: {},
+        onLogin: { _ in }
+    )
+}
+
+#Preview("Login - Busy") {
+    LoginView(
+        state: LoginViewState(creatingAccount: false, loggingIn: true),
+        onCreateAccount: {},
+        onLogin: { _ in }
+    )
+}
+
+#Preview("Login - Creating") {
+    LoginView(
+        state: LoginViewState(creatingAccount: true, loggingIn: false),
+        onCreateAccount: {},
+        onLogin: { _ in }
+    )
+}
+#endif

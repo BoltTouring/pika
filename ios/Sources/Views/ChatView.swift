@@ -1,12 +1,13 @@
 import SwiftUI
 
 struct ChatView: View {
-    let manager: AppManager
     let chatId: String
+    let state: ChatScreenState
+    let onSendMessage: @MainActor (String) -> Void
     @State private var messageText = ""
 
     var body: some View {
-        if let chat = manager.state.currentChat, chat.chatId == chatId {
+        if let chat = state.chat, chat.chatId == chatId {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: 8) {
@@ -30,10 +31,10 @@ struct ChatView: View {
         }
     }
 
-    private func sendMessage(chat: ChatViewState) {
+    private func sendMessage() {
         let trimmed = messageText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        manager.dispatch(.sendMessage(chatId: chat.chatId, content: trimmed))
+        onSendMessage(trimmed)
         messageText = ""
     }
 
@@ -41,10 +42,10 @@ struct ChatView: View {
     private func messageInputBar(chat: ChatViewState) -> some View {
         HStack(spacing: 10) {
             TextField("Message", text: $messageText)
-                .onSubmit { sendMessage(chat: chat) }
+                .onSubmit { sendMessage() }
                 .accessibilityIdentifier(TestIds.chatMessageInput)
 
-            Button(action: { sendMessage(chat: chat) }) {
+            Button(action: { sendMessage() }) {
                 Image(systemName: "arrow.up.circle.fill")
                     .font(.title2)
             }
@@ -129,3 +130,45 @@ private struct MessageRow: View {
         }
     }
 }
+
+#if DEBUG
+#Preview("Chat") {
+    NavigationStack {
+        ChatView(
+            chatId: "chat-1",
+            state: ChatScreenState(chat: PreviewAppState.chatDetail.currentChat),
+            onSendMessage: { _ in }
+        )
+    }
+}
+
+#Preview("Chat - Failed") {
+    NavigationStack {
+        ChatView(
+            chatId: "chat-1",
+            state: ChatScreenState(chat: PreviewAppState.chatDetailFailed.currentChat),
+            onSendMessage: { _ in }
+        )
+    }
+}
+
+#Preview("Chat - Empty") {
+    NavigationStack {
+        ChatView(
+            chatId: "chat-empty",
+            state: ChatScreenState(chat: PreviewAppState.chatDetailEmpty.currentChat),
+            onSendMessage: { _ in }
+        )
+    }
+}
+
+#Preview("Chat - Long Thread") {
+    NavigationStack {
+        ChatView(
+            chatId: "chat-long",
+            state: ChatScreenState(chat: PreviewAppState.chatDetailLongThread.currentChat),
+            onSendMessage: { _ in }
+        )
+    }
+}
+#endif

@@ -6,16 +6,21 @@ struct ContentView: View {
     @State private var navPath: [Screen] = []
 
     var body: some View {
-        let router = manager.state.router
+        let appState = manager.state
+        let router = appState.router
         Group {
             switch router.defaultScreen {
             case .login:
-                LoginView(manager: manager)
+                LoginView(
+                    state: loginState(from: appState),
+                    onCreateAccount: { manager.dispatch(.createAccount) },
+                    onLogin: { manager.login(nsec: $0) }
+                )
             default:
                 NavigationStack(path: $navPath) {
-                    screenView(manager: manager, screen: router.defaultScreen)
+                    screenView(manager: manager, state: appState, screen: router.defaultScreen)
                         .navigationDestination(for: Screen.self) { screen in
-                            screenView(manager: manager, screen: screen)
+                            screenView(manager: manager, state: appState, screen: screen)
                         }
                 }
                 .onAppear {
@@ -73,15 +78,80 @@ struct ContentView: View {
 }
 
 @ViewBuilder
-private func screenView(manager: AppManager, screen: Screen) -> some View {
+private func screenView(manager: AppManager, state: AppState, screen: Screen) -> some View {
     switch screen {
     case .login:
-        LoginView(manager: manager)
+        LoginView(
+            state: loginState(from: state),
+            onCreateAccount: { manager.dispatch(.createAccount) },
+            onLogin: { manager.login(nsec: $0) }
+        )
     case .chatList:
-        ChatListView(manager: manager)
+        ChatListView(
+            state: chatListState(from: state),
+            onLogout: { manager.logout() },
+            onOpenChat: { manager.dispatch(.openChat(chatId: $0)) },
+            onNewChat: { manager.dispatch(.pushScreen(screen: .newChat)) }
+        )
     case .newChat:
-        NewChatView(manager: manager)
+        NewChatView(
+            state: newChatState(from: state),
+            onCreateChat: { manager.dispatch(.createChat(peerNpub: $0)) }
+        )
     case .chat(let chatId):
-        ChatView(manager: manager, chatId: chatId)
+        ChatView(
+            chatId: chatId,
+            state: chatScreenState(from: state),
+            onSendMessage: { manager.dispatch(.sendMessage(chatId: chatId, content: $0)) }
+        )
     }
 }
+
+private func loginState(from state: AppState) -> LoginViewState {
+    LoginViewState(
+        creatingAccount: state.busy.creatingAccount,
+        loggingIn: state.busy.loggingIn
+    )
+}
+
+private func chatListState(from state: AppState) -> ChatListViewState {
+    ChatListViewState(
+        chats: state.chatList,
+        myNpub: myNpub(from: state)
+    )
+}
+
+private func newChatState(from state: AppState) -> NewChatViewState {
+    NewChatViewState(isCreatingChat: state.busy.creatingChat)
+}
+
+private func chatScreenState(from state: AppState) -> ChatScreenState {
+    ChatScreenState(chat: state.currentChat)
+}
+
+private func myNpub(from state: AppState) -> String? {
+    switch state.auth {
+    case .loggedIn(let npub, _):
+        return npub
+    default:
+        return nil
+    }
+}
+
+#if DEBUG
+#Preview("Logged Out") {
+    ContentView(manager: PreviewFactory.manager(PreviewAppState.loggedOut))
+}
+
+#Preview("Chat List") {
+    ContentView(manager: PreviewFactory.manager(PreviewAppState.chatListPopulated))
+}
+
+#Preview("Chat List - Long Names") {
+    ContentView(manager: PreviewFactory.manager(PreviewAppState.chatListLongNames))
+}
+
+#Preview("Toast") {
+    ContentView(manager: PreviewFactory.manager(PreviewAppState.toastVisible))
+}
+#endif
