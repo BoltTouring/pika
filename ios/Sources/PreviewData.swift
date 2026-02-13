@@ -85,9 +85,31 @@ enum PreviewAppState {
         )
     }
 
-    static var creatingChat: AppState {
+    static var chatListLongNames: AppState {
         base(
             rev: 12,
+            router: Router(defaultScreen: .chatList, screenStack: []),
+            auth: .loggedIn(npub: sampleNpub, pubkey: samplePubkey),
+            chatList: [
+                chatSummary(
+                    id: "chat-long-1",
+                    name: "Alexandria Catherine Montgomery-Smythe",
+                    lastMessage: "This is a deliberately long message preview to verify truncation.",
+                    unread: 120
+                ),
+                chatSummary(
+                    id: "chat-long-2",
+                    name: "VeryVeryVeryLongDisplayNameWithoutSpaces",
+                    lastMessage: "Short msg",
+                    unread: 0
+                ),
+            ]
+        )
+    }
+
+    static var creatingChat: AppState {
+        base(
+            rev: 13,
             router: Router(defaultScreen: .newChat, screenStack: [.newChat]),
             auth: .loggedIn(npub: sampleNpub, pubkey: samplePubkey),
             busy: BusyState(creatingAccount: false, loggingIn: false, creatingChat: true)
@@ -96,7 +118,7 @@ enum PreviewAppState {
 
     static var newChatIdle: AppState {
         base(
-            rev: 13,
+            rev: 14,
             router: Router(defaultScreen: .newChat, screenStack: [.newChat]),
             auth: .loggedIn(npub: sampleNpub, pubkey: samplePubkey)
         )
@@ -104,7 +126,7 @@ enum PreviewAppState {
 
     static var chatDetail: AppState {
         base(
-            rev: 20,
+            rev: 30,
             router: Router(defaultScreen: .chat(chatId: "chat-1"), screenStack: [.chat(chatId: "chat-1")]),
             auth: .loggedIn(npub: sampleNpub, pubkey: samplePubkey),
             currentChat: chatViewState(id: "chat-1", name: "Justin", failed: false)
@@ -113,10 +135,45 @@ enum PreviewAppState {
 
     static var chatDetailFailed: AppState {
         base(
-            rev: 21,
+            rev: 31,
             router: Router(defaultScreen: .chat(chatId: "chat-1"), screenStack: [.chat(chatId: "chat-1")]),
             auth: .loggedIn(npub: sampleNpub, pubkey: samplePubkey),
             currentChat: chatViewState(id: "chat-1", name: "Justin", failed: true)
+        )
+    }
+
+    static var chatDetailEmpty: AppState {
+        base(
+            rev: 32,
+            router: Router(defaultScreen: .chat(chatId: "chat-empty"), screenStack: [.chat(chatId: "chat-empty")]),
+            auth: .loggedIn(npub: sampleNpub, pubkey: samplePubkey),
+            currentChat: ChatViewState(
+                chatId: "chat-empty",
+                peerNpub: samplePeerNpub,
+                peerName: "Empty Chat",
+                peerPictureUrl: nil,
+                messages: [],
+                canLoadOlder: false
+            )
+        )
+    }
+
+    static var chatDetailLongThread: AppState {
+        base(
+            rev: 33,
+            router: Router(defaultScreen: .chat(chatId: "chat-long"), screenStack: [.chat(chatId: "chat-long")]),
+            auth: .loggedIn(npub: sampleNpub, pubkey: samplePubkey),
+            currentChat: chatViewStateLongThread()
+        )
+    }
+
+    static var toastVisible: AppState {
+        base(
+            rev: 40,
+            router: Router(defaultScreen: .chatList, screenStack: []),
+            auth: .loggedIn(npub: sampleNpub, pubkey: samplePubkey),
+            chatList: chatListPopulated.chatList,
+            toast: "Network connection lost."
         )
     }
 
@@ -190,9 +247,33 @@ enum PreviewAppState {
         )
     }
 
-    private static let sampleNpub = "npub1zxu639qym0esxnn7rzrt48wycmfhdu3e5yvzwx7ja3t84zyc2r8qz8cx2y"
-    private static let samplePubkey = "11b9a894813efe60d39f8621ae9dc4c6d26de4732411c1cdf4bb15e88898a19c"
-    private static let samplePeerNpub = "npub1y2z0c7un9dwmhk4zrpw8df8p0gh0j2x54qhznwqjnp452ju4078srmwp70"
-    private static let samplePeerPubkey = "2284fc7b932b5dbbdaa2185c76a4e17a2ef928d4a82e29b812986b454b957f8f"
+    private static func chatViewStateLongThread() -> ChatViewState {
+        let messages = (0..<20).map { idx in
+            ChatMessage(
+                id: "m\(idx)",
+                senderPubkey: idx.isMultiple(of: 2) ? samplePubkey : samplePeerPubkey,
+                content: idx.isMultiple(of: 3)
+                    ? "A long message intended to wrap across multiple lines for layout validation."
+                    : "Message \(idx + 1)",
+                timestamp: Int64(1_709_000_200 + idx),
+                isMine: idx.isMultiple(of: 2),
+                delivery: .sent
+            )
+        }
+
+        return ChatViewState(
+            chatId: "chat-long",
+            peerNpub: samplePeerNpub,
+            peerName: "Long Thread",
+            peerPictureUrl: nil,
+            messages: messages,
+            canLoadOlder: true
+        )
+    }
+
+    static let sampleNpub = "npub1zxu639qym0esxnn7rzrt48wycmfhdu3e5yvzwx7ja3t84zyc2r8qz8cx2y"
+    static let samplePubkey = "11b9a894813efe60d39f8621ae9dc4c6d26de4732411c1cdf4bb15e88898a19c"
+    static let samplePeerNpub = "npub1y2z0c7un9dwmhk4zrpw8df8p0gh0j2x54qhznwqjnp452ju4078srmwp70"
+    static let samplePeerPubkey = "2284fc7b932b5dbbdaa2185c76a4e17a2ef928d4a82e29b812986b454b957f8f"
 }
 #endif

@@ -1,11 +1,14 @@
 import SwiftUI
 
 struct ChatListView: View {
-    let manager: AppManager
+    let state: ChatListViewState
+    let onLogout: @MainActor () -> Void
+    let onOpenChat: @MainActor (String) -> Void
+    let onNewChat: @MainActor () -> Void
     @State private var showMyNpub = false
 
     var body: some View {
-        List(manager.state.chatList, id: \.chatId) { chat in
+        List(state.chats, id: \.chatId) { chat in
             let displayName = chat.peerName ?? truncatedNpub(chat.peerNpub)
             let subtitle = chat.peerName != nil ? truncatedNpub(chat.peerNpub) : nil
 
@@ -42,17 +45,17 @@ struct ChatListView: View {
             }
             .contentShape(Rectangle())
             .onTapGesture {
-                manager.dispatch(.openChat(chatId: chat.chatId))
+                onOpenChat(chat.chatId)
             }
         }
         .navigationTitle("Chats")
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
-                Button("Logout") { manager.logout() }
+                Button("Logout") { onLogout() }
                     .accessibilityIdentifier(TestIds.chatListLogout)
             }
             ToolbarItem(placement: .topBarTrailing) {
-                if let npub = myNpub() {
+                if let npub = state.myNpub {
                     Button {
                         showMyNpub = true
                     } label: {
@@ -67,22 +70,13 @@ struct ChatListView: View {
             }
             ToolbarItem(placement: .topBarTrailing) {
                 Button {
-                    manager.dispatch(.pushScreen(screen: .newChat))
+                    onNewChat()
                 } label: {
                     Image(systemName: "square.and.pencil")
                 }
                 .accessibilityLabel("New Chat")
                 .accessibilityIdentifier(TestIds.chatListNewChat)
             }
-        }
-    }
-
-    private func myNpub() -> String? {
-        switch manager.state.auth {
-        case .loggedIn(let npub, _):
-            return npub
-        default:
-            return nil
         }
     }
 
@@ -95,13 +89,43 @@ struct ChatListView: View {
 #if DEBUG
 #Preview("Chat List - Empty") {
     NavigationStack {
-        ChatListView(manager: PreviewFactory.manager(PreviewAppState.chatListEmpty))
+        ChatListView(
+            state: ChatListViewState(
+                chats: PreviewAppState.chatListEmpty.chatList,
+                myNpub: PreviewAppState.sampleNpub
+            ),
+            onLogout: {},
+            onOpenChat: { _ in },
+            onNewChat: {}
+        )
     }
 }
 
 #Preview("Chat List - Populated") {
     NavigationStack {
-        ChatListView(manager: PreviewFactory.manager(PreviewAppState.chatListPopulated))
+        ChatListView(
+            state: ChatListViewState(
+                chats: PreviewAppState.chatListPopulated.chatList,
+                myNpub: PreviewAppState.sampleNpub
+            ),
+            onLogout: {},
+            onOpenChat: { _ in },
+            onNewChat: {}
+        )
+    }
+}
+
+#Preview("Chat List - Long Names") {
+    NavigationStack {
+        ChatListView(
+            state: ChatListViewState(
+                chats: PreviewAppState.chatListLongNames.chatList,
+                myNpub: PreviewAppState.sampleNpub
+            ),
+            onLogout: {},
+            onOpenChat: { _ in },
+            onNewChat: {}
+        )
     }
 }
 #endif
