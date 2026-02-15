@@ -2,6 +2,13 @@ import SwiftUI
 import MarkdownUI
 import WebKit
 
+// WKWebView requires a resolvable HTTPS baseURL for loadHTMLString to allow
+// fetching external subresources (images, scripts, etc.). The domain must
+// actually resolve — non-routable origins like localhost or .invalid break
+// asset loading. We use a domain we control that won't serve unexpected content.
+// TODO: Change to a pika related domain
+private let webViewBaseURL = URL(string: "https://webview.benthecarman.com")!
+
 struct ChatView: View {
     let chatId: String
     let state: ChatScreenState
@@ -11,6 +18,7 @@ struct ChatView: View {
     let onReact: (@MainActor (String, String) -> Void)?
     @State private var messageText = ""
     @State private var isAtBottom = true
+    @State private var activeReactionMessageId: String?
     @State private var showMentionPicker = false
     @State private var mentionQuery = ""
     @State private var insertedMentions: [(display: String, npub: String)] = []
@@ -34,7 +42,7 @@ struct ChatView: View {
                     VStack(spacing: 0) {
                         LazyVStack(spacing: 8) {
                             ForEach(groupedMessages(chat)) { group in
-                                MessageGroupRow(group: group, showSender: chat.isGroup, onSendMessage: onSendMessage, onTapSender: onTapSender, onReact: onReact)
+                                MessageGroupRow(group: group, showSender: chat.isGroup, onSendMessage: onSendMessage, onTapSender: onTapSender, onReact: onReact, activeReactionMessageId: $activeReactionMessageId)
                             }
                         }
                         .padding(.horizontal, 12)
@@ -48,6 +56,17 @@ struct ChatView: View {
                         }
                         .frame(height: 1)
                         .id("bottom-anchor")
+                    }
+                }
+                .overlay {
+                    if activeReactionMessageId != nil {
+                        Color.clear
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                withAnimation(.easeOut(duration: 0.15)) {
+                                    activeReactionMessageId = nil
+                                }
+                            }
                     }
                 }
                 .coordinateSpace(name: "chatScroll")
@@ -561,7 +580,7 @@ private struct MessageGroupRow: View {
     let onSendMessage: @MainActor (String) -> Void
     var onTapSender: (@MainActor (String) -> Void)?
     var onReact: ((String, String) -> Void)?
-    @State private var activeReactionMessageId: String?
+    @Binding var activeReactionMessageId: String?
 
     private let avatarSize: CGFloat = 24
     private let avatarGutterWidth: CGFloat = 28
@@ -681,21 +700,23 @@ private struct MessageBubble: View {
         let segments = parseMessageSegments(message.displayContent, htmlState: message.htmlState)
 
         VStack(alignment: message.isMine ? .trailing : .leading, spacing: 0) {
-            ForEach(segments) { segment in
-                switch segment {
-                case .markdown(let text):
-                    markdownBubble(text: text)
-                case .pikaPrompt(let prompt):
-                    PikaPromptView(prompt: prompt, message: message, onSelect: onSendMessage)
-                case .pikaHtml(_, let html, let state):
-                    PikaHtmlView(html: html, htmlState: state, onSendMessage: onSendMessage)
-                }
-            }
-            .onLongPressGesture {
-                let impactFeedback = UIImpactFeedbackGenerator(style: .medium)
-                impactFeedback.impactOccurred()
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
-                    activeReactionMessageId = message.id
+            VStack(alignment: message.isMine ? .trailing : .leading, spacing: 0) {
+                ForEach(segments) { segment in
+                    switch segment {
+                    case .markdown(let text):
+                        markdownBubble(text: text)
+                            .onLongPressGesture {
+                                let impactFeedback = UIImpactFeedbackGenerator(style: .medium)
+                                impactFeedback.impactOccurred()
+                                withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                                    activeReactionMessageId = message.id
+                                }
+                            }
+                    case .pikaPrompt(let prompt):
+                        PikaPromptView(prompt: prompt, message: message, onSelect: onSendMessage)
+                    case .pikaHtml(_, let html, let state):
+                        PikaHtmlView(html: html, htmlState: state, onSendMessage: onSendMessage)
+                    }
                 }
             }
             .overlay(alignment: message.isMine ? .topTrailing : .topLeading) {
@@ -952,20 +973,26 @@ private struct PikaFullScreenWebView: UIViewRepresentable {
             context.coordinator.pendingState = state
         }
 
-        let wrapped = """
-        <!DOCTYPE html>
-        <html>
-        <head>
-        <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
-        <style>
-        :root { color-scheme: light dark; }
-        body { margin: 8px; font-family: -apple-system, sans-serif; background: transparent; }
-        </style>
-        </head>
-        <body>\(html)</body>
-        </html>
-        """
-        webView.loadHTMLString(wrapped, baseURL: nil)
+        let finalHtml: String
+        let trimmed = html.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("<!") || trimmed.lowercased().hasPrefix("<html") {
+            finalHtml = html
+        } else {
+            finalHtml = """
+            <!DOCTYPE html>
+            <html>
+            <head>
+            <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+            <style>
+            :root { color-scheme: light dark; }
+            body { margin: 8px; font-family: -apple-system, sans-serif; background: transparent; }
+            </style>
+            </head>
+            <body>\(html)</body>
+            </html>
+            """
+        }
+        webView.loadHTMLString(finalHtml, baseURL: webViewBaseURL)
         return webView
     }
 
@@ -1025,22 +1052,38 @@ private struct PikaWebView: UIViewRepresentable {
                 binding.wrappedValue = height
             }
         }
-        context.coordinator.observeContentSize(webView)
-
-        let wrapped = """
-        <!DOCTYPE html>
-        <html>
-        <head>
-        <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
-        <style>
-        :root { color-scheme: light dark; }
-        body { margin: 8px; font-family: -apple-system, sans-serif; background: transparent; }
-        </style>
-        </head>
-        <body>\(html)</body>
-        </html>
+        let debugOverlay = """
+        <div id="_pika_dbg" style="display:none;position:fixed;top:0;left:0;right:0;padding:4px 8px;font:16px monospace;color:#f44;background:rgba(0,0,0,0.8);z-index:99999;pointer-events:none"></div>
+        <script>
+        var _d=document.getElementById('_pika_dbg');
+        window.onerror=function(m,u,l){_d.style.display='block';_d.textContent='ERR: '+m+' ('+u+':'+l+')';};
+        window.addEventListener('unhandledrejection',function(e){_d.style.display='block';_d.textContent='REJECT: '+e.reason;});
+        </script>
         """
-        webView.loadHTMLString(wrapped, baseURL: nil)
+        let finalHtml: String
+        let trimmed = html.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("<!") || trimmed.lowercased().hasPrefix("<html") {
+            if let range = html.range(of: "</body>", options: .caseInsensitive) {
+                finalHtml = html[html.startIndex..<range.lowerBound] + debugOverlay + html[range.lowerBound...]
+            } else {
+                finalHtml = html + debugOverlay
+            }
+        } else {
+            finalHtml = """
+            <!DOCTYPE html>
+            <html>
+            <head>
+            <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+            <style>
+            :root { color-scheme: light dark; }
+            body { margin: 8px; font-family: -apple-system, sans-serif; background: transparent; }
+            </style>
+            </head>
+            <body>\(html)\(debugOverlay)</body>
+            </html>
+            """
+        }
+        webView.loadHTMLString(finalHtml, baseURL: webViewBaseURL)
         return webView
     }
 
@@ -1064,18 +1107,9 @@ private struct PikaWebView: UIViewRepresentable {
         var lastInjectedState: String?
         var pendingState: String?
         var pageLoaded = false
-        private var observation: NSKeyValueObservation?
 
         init(onSendMessage: @escaping @MainActor (String) -> Void) {
             self.onSendMessage = onSendMessage
-        }
-
-        func observeContentSize(_ webView: WKWebView) {
-            observation = webView.scrollView.observe(\.contentSize, options: .new) { [weak self] _, change in
-                if let size = change.newValue, size.height > 0 {
-                    self?.onHeightChange?(size.height)
-                }
-            }
         }
 
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
@@ -1093,6 +1127,13 @@ private struct PikaWebView: UIViewRepresentable {
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             pageLoaded = true
+            // Measure content height once after load to size the frame without
+            // a continuous observer that causes layout feedback loops.
+            webView.evaluateJavaScript("document.documentElement.scrollHeight") { [weak self] result, _ in
+                if let height = result as? CGFloat, height > 0 {
+                    self?.onHeightChange?(height)
+                }
+            }
             // Inject pending state after initial page load (handles case where
             // updateUIView fires before the page is ready).
             if let state = pendingState {
@@ -1274,12 +1315,12 @@ private enum ChatViewPreviewData {
 }
 
 #Preview("Message Group - Incoming") {
-    MessageGroupRow(group: ChatViewPreviewData.incomingGroup, showSender: true, onSendMessage: { _ in })
+    MessageGroupRow(group: ChatViewPreviewData.incomingGroup, showSender: true, onSendMessage: { _ in }, activeReactionMessageId: .constant(nil))
         .padding(16)
 }
 
 #Preview("Message Group - Outgoing") {
-    MessageGroupRow(group: ChatViewPreviewData.outgoingGroup, showSender: true, onSendMessage: { _ in })
+    MessageGroupRow(group: ChatViewPreviewData.outgoingGroup, showSender: true, onSendMessage: { _ in }, activeReactionMessageId: .constant(nil))
         .padding(16)
 }
 #endif
