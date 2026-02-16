@@ -799,7 +799,6 @@ impl AppCore {
                         result.welcome_rumors,
                         added,
                     );
-                    self.set_busy(|b| b.creating_chat = false);
                 } else {
                     // Create new group chat.
                     let kp_events: Vec<Event> = key_package_events
@@ -2187,22 +2186,59 @@ impl AppCore {
         let chat_id = chat_id.to_string();
         let mls_group_id_clone = mls_group_id.clone();
 
-        // Optimistic: report success immediately so group operations don't
-        // block on slow/dead relays. The broadcast continues in the background.
-        let _ = tx.send(CoreMsg::Internal(Box::new(
-            InternalEvent::GroupEvolutionPublished {
-                chat_id: chat_id.clone(),
-                mls_group_id: mls_group_id_clone,
-                welcome_rumors,
-                added_pubkeys,
-                ok: true,
-                error: None,
-            },
-        )));
         self.runtime.spawn(async move {
-            if let Err(e) = client.send_event_to(&relays, &event).await {
-                tracing::warn!(%e, chat_id, "evolution event broadcast failed");
+            // Retry with exponential backoff, matching key-package publish pattern.
+            // Some relays require NIP-42 auth before accepting protected events.
+            let mut last_err: Option<String> = None;
+            for attempt in 0..5u8 {
+                match client.send_event_to(&relays, &event).await {
+                    Ok(output) if !output.success.is_empty() => {
+                        let _ = tx.send(CoreMsg::Internal(Box::new(
+                            InternalEvent::GroupEvolutionPublished {
+                                chat_id,
+                                mls_group_id: mls_group_id_clone,
+                                welcome_rumors,
+                                added_pubkeys,
+                                ok: true,
+                                error: None,
+                            },
+                        )));
+                        return;
+                    }
+                    Ok(output) => {
+                        let err = output
+                            .failed
+                            .values()
+                            .next()
+                            .cloned()
+                            .unwrap_or_else(|| "no relay accepted event".into());
+                        let should_retry = err.contains("protected")
+                            || err.contains("auth")
+                            || err.contains("AUTH");
+                        if !should_retry {
+                            last_err = Some(err);
+                            break;
+                        }
+                        last_err = Some(err);
+                    }
+                    Err(e) => {
+                        last_err = Some(e.to_string());
+                    }
+                }
+                let delay_ms = 250u64.saturating_mul(1u64 << attempt);
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
             }
+            tracing::warn!(error = ?last_err, chat_id, "evolution event broadcast failed after retries");
+            let _ = tx.send(CoreMsg::Internal(Box::new(
+                InternalEvent::GroupEvolutionPublished {
+                    chat_id,
+                    mls_group_id: mls_group_id_clone,
+                    welcome_rumors,
+                    added_pubkeys,
+                    ok: false,
+                    error: last_err,
+                },
+            )));
         });
     }
 }
