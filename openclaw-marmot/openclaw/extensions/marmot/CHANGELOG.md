@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.1
+
+- Release pipeline: tag `marmotd-v*` is now the single source of truth for versioning across Rust binary and npm package.
+
 ## 0.3.0
 
 **Breaking: MLS library upgrade (openmls 0.7.1 -> 0.8.1)**
