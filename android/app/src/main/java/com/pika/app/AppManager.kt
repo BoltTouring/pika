@@ -11,11 +11,15 @@ import com.pika.app.rust.AppReconciler
 import com.pika.app.rust.AppState
 import com.pika.app.rust.AppUpdate
 import com.pika.app.rust.FfiApp
+import com.pika.app.rust.MyProfileState
+import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
+import org.json.JSONObject
 
 class AppManager private constructor(context: Context) : AppReconciler {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val secureStore = SecureNsecStore(context)
+    private val audioFocus = AndroidAudioFocusManager(context.applicationContext)
     private val rust: FfiApp
     private var lastRevApplied: ULong = 0UL
     private val listening = AtomicBoolean(false)
@@ -28,29 +32,78 @@ class AppManager private constructor(context: Context) : AppReconciler {
                 screenStack = emptyList(),
             ),
             auth = com.pika.app.rust.AuthState.LoggedOut,
+            myProfile = MyProfileState(name = "", about = "", pictureUrl = null),
             busy = com.pika.app.rust.BusyState(
                 creatingAccount = false,
                 loggingIn = false,
                 creatingChat = false,
+                fetchingFollowList = false,
             ),
             chatList = emptyList(),
             currentChat = null,
+            followList = emptyList(),
+            peerProfile = null,
+            activeCall = null,
             toast = null,
         ),
     )
         private set
 
     init {
+        // Ensure call config is present before Rust bootstraps. If the file already exists (e.g.
+        // created by tooling), only fill missing keys to avoid clobbering overrides.
+        ensureDefaultConfig(context)
+
         val dataDir = context.filesDir.absolutePath
         rust = FfiApp(dataDir)
         val initial = rust.state()
         state = initial
+        audioFocus.syncForCall(initial.activeCall)
         lastRevApplied = initial.rev
         startListening()
 
         val storedNsec = secureStore.getNsec()
         if (!storedNsec.isNullOrBlank()) {
             rust.dispatch(AppAction.RestoreSession(storedNsec))
+        }
+    }
+
+    private fun ensureDefaultConfig(context: Context) {
+        val filesDir = context.filesDir
+        val path = File(filesDir, "pika_config.json")
+        val defaultMoqUrl = "https://us-east.moq.logos.surf/anon"
+        val defaultBroadcastPrefix = "pika/calls"
+
+        val obj =
+            runCatching {
+                if (path.exists()) {
+                    JSONObject(path.readText())
+                } else {
+                    JSONObject()
+                }
+            }.getOrElse { JSONObject() }
+
+        fun isMissingOrBlank(key: String): Boolean {
+            if (!obj.has(key)) return true
+            val v = obj.optString(key, "").trim()
+            return v.isEmpty()
+        }
+
+        if (isMissingOrBlank("call_moq_url")) {
+            obj.put("call_moq_url", defaultMoqUrl)
+        }
+        if (isMissingOrBlank("call_broadcast_prefix")) {
+            obj.put("call_broadcast_prefix", defaultBroadcastPrefix)
+        }
+
+        runCatching {
+            val tmp = File(filesDir, "pika_config.json.tmp")
+            tmp.writeText(obj.toString())
+            if (!tmp.renameTo(path)) {
+                // Fallback for devices that don't allow rename across filesystems (shouldn't happen in app filesDir).
+                path.writeText(obj.toString())
+                tmp.delete()
+            }
         }
     }
 
@@ -107,6 +160,7 @@ class AppManager private constructor(context: Context) : AppReconciler {
                     state = state.copy(rev = updateRev)
                 }
             }
+            audioFocus.syncForCall(state.activeCall)
         }
     }
 

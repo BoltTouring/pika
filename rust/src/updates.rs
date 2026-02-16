@@ -58,7 +58,6 @@ pub enum InternalEvent {
     // Async CreateChat fetch result (1:1)
     PeerKeyPackageFetched {
         peer_pubkey: nostr_sdk::prelude::PublicKey,
-        candidate_kp_relays: Vec<nostr_sdk::prelude::RelayUrl>,
         key_package_event: Option<nostr_sdk::prelude::Event>,
         error: Option<String>,
     },
@@ -123,5 +122,18 @@ pub enum InternalEvent {
     ContactListModifyFailed {
         pubkey: String,
         revert_to: bool, // revert is_followed to this value
+    },
+
+    // Synthetic media runtime updates (Phase-1 plumbing).
+    CallRuntimeConnected {
+        call_id: String,
+    },
+    CallRuntimeStats {
+        call_id: String,
+        tx_frames: u64,
+        rx_frames: u64,
+        rx_dropped: u64,
+        jitter_buffer_ms: u32,
+        last_rtt_ms: Option<u32>,
     },
 }
