@@ -85,6 +85,7 @@ fn run_ios(
         .arg("-sdk")
         .arg("iphonesimulator")
         .arg("build")
+        .arg(format!("ARCHS={xcode_arch}"))
         .arg("ONLY_ACTIVE_ARCH=YES")
         .arg("CODE_SIGNING_ALLOWED=NO")
         .arg(format!("PRODUCT_BUNDLE_IDENTIFIER={bundle_id}"));
@@ -104,6 +105,7 @@ fn run_ios(
         &xcode_scheme,
         &udid,
         xcode_config,
+        xcode_arch,
     )?;
     if !app_path.is_dir() {
         return Err(CliError::operational(format!(
@@ -1074,6 +1076,7 @@ fn resolve_ios_app_path(
     xcode_scheme: &str,
     udid: &str,
     xcode_config: &str,
+    xcode_arch: &str,
 ) -> Result<PathBuf, CliError> {
     let mut cmd = Command::new("/usr/bin/xcrun");
     cmd.env("DEVELOPER_DIR", dev_dir)
@@ -1091,6 +1094,8 @@ fn resolve_ios_app_path(
         .arg(xcode_config)
         .arg("-sdk")
         .arg("iphonesimulator")
+        .arg(format!("ARCHS={xcode_arch}"))
+        .arg("ONLY_ACTIVE_ARCH=YES")
         .arg("-showBuildSettings");
     let out = run_capture(cmd)?;
     if !out.status.success() {

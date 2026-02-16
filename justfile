@@ -245,6 +245,7 @@ gen-kotlin: rust-build-host
     --config rust/uniffi.toml
 
 # Cross-compile Rust core for Android (arm64, armv7, x86_64).
+# Note: this clears `android/app/src/main/jniLibs` so output matches the requested ABI set.
 android-rust:
   set -euo pipefail; \
   PROFILE="${PIKA_RUST_PROFILE:-release}"; \
@@ -310,6 +311,7 @@ ios-gen-swift: rust-build-host
   python3 -c 'from pathlib import Path; import re; p=Path("ios/Bindings/pika_core.swift"); data=p.read_text(encoding="utf-8").replace("\r\n","\n").replace("\r","\n"); data=re.sub(r"[ \t]+$", "", data, flags=re.M); data=data.rstrip("\n")+"\n"; p.write_text(data, encoding="utf-8")'
 
 # Cross-compile Rust core for iOS (device + simulator).
+# Keep `PIKA_IOS_RUST_TARGETS` aligned with destination (device vs simulator) to avoid link errors.
 ios-rust:
   # Nix shells often set CC/CXX/SDKROOT/MACOSX_DEPLOYMENT_TARGET for macOS builds.
   # For iOS targets, force Xcode toolchain compilers + iOS SDK roots.

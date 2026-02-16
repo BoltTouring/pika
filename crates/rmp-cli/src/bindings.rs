@@ -114,8 +114,7 @@ pub fn bindings(
             )?;
         }
         crate::cli::BindingsTarget::Kotlin => {
-            let _android =
-                android.ok_or_else(|| CliError::user("rmp.toml missing [android] section"))?;
+            let _ = android.ok_or_else(|| CliError::user("rmp.toml missing [android] section"))?;
             if args.clean {
                 clean_android(root, verbose)?;
             }
@@ -128,8 +127,7 @@ pub fn bindings(
         }
         crate::cli::BindingsTarget::All => {
             let _ = ios.ok_or_else(|| CliError::user("rmp.toml missing [ios] section"))?;
-            let _android =
-                android.ok_or_else(|| CliError::user("rmp.toml missing [android] section"))?;
+            let _ = android.ok_or_else(|| CliError::user("rmp.toml missing [android] section"))?;
             if args.clean {
                 clean_ios(root, verbose)?;
                 clean_android(root, verbose)?;
@@ -248,7 +246,7 @@ fn generate_ios_sources(
         .arg("--out-dir")
         .arg(&out_dir)
         .arg("--config")
-        .arg(root.join("rust/uniffi.toml"))
+        .arg(uniffi_toml_path(root)?)
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .status()
@@ -297,7 +295,7 @@ fn generate_android_sources(
         .arg(&out_dir)
         .arg("--no-format")
         .arg("--config")
-        .arg(root.join("rust/uniffi.toml"))
+        .arg(uniffi_toml_path(root)?)
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .status()
@@ -361,7 +359,7 @@ fn check_ios_sources(root: &Path, cfg: &RmpToml, verbose: bool) -> Result<(), Cl
         .arg("--out-dir")
         .arg(&out_dir)
         .arg("--config")
-        .arg(root.join("rust/uniffi.toml"))
+        .arg(uniffi_toml_path(root)?)
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .status()
@@ -404,7 +402,7 @@ fn check_android_sources(root: &Path, cfg: &RmpToml, verbose: bool) -> Result<()
         .arg(&out_dir)
         .arg("--no-format")
         .arg("--config")
-        .arg(root.join("rust/uniffi.toml"))
+        .arg(uniffi_toml_path(root)?)
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .status()
@@ -751,6 +749,7 @@ fn build_android_so(
     }
 
     let out_dir = root.join("android/app/src/main/jniLibs");
+    // Clear old slices first so the package exactly matches the requested ABI set.
     let _ = std::fs::remove_dir_all(&out_dir);
     std::fs::create_dir_all(&out_dir)
         .map_err(|e| CliError::operational(format!("failed to create jniLibs dir: {e}")))?;
@@ -884,7 +883,17 @@ fn compute_bindgen_inputs_hash(root: &Path) -> Result<String, CliError> {
             files.push(ent.path().to_path_buf());
         }
     }
-    files.push(root.join("rust/uniffi.toml"));
+    files.push(uniffi_toml_path(root)?);
+    for extra in [
+        root.join("Cargo.toml"),
+        root.join("Cargo.lock"),
+        root.join("rust/Cargo.toml"),
+        root.join("rust/Cargo.lock"),
+    ] {
+        if extra.is_file() {
+            files.push(extra);
+        }
+    }
     files.sort();
 
     let mut hash: u64 = 0xcbf29ce484222325;
@@ -922,7 +931,7 @@ fn kotlin_bindings_dir(root: &Path) -> Result<PathBuf, CliError> {
 }
 
 fn kotlin_bindings_relpath(root: &Path) -> Result<PathBuf, CliError> {
-    let uniffi = root.join("rust/uniffi.toml");
+    let uniffi = uniffi_toml_path(root)?;
     let s = std::fs::read_to_string(&uniffi)
         .map_err(|e| CliError::operational(format!("failed to read {}: {e}", uniffi.display())))?;
     let v: toml::Value = toml::from_str(&s)
@@ -939,6 +948,20 @@ fn kotlin_bindings_relpath(root: &Path) -> Result<PathBuf, CliError> {
         ));
     }
     Ok(PathBuf::from(pkg.replace('.', "/")))
+}
+
+fn uniffi_toml_path(root: &Path) -> Result<PathBuf, CliError> {
+    let primary = root.join("rust/uniffi.toml");
+    if primary.is_file() {
+        return Ok(primary);
+    }
+    let fallback = root.join("uniffi.toml");
+    if fallback.is_file() {
+        return Ok(fallback);
+    }
+    Err(CliError::user(
+        "missing UniFFI config (expected rust/uniffi.toml or uniffi.toml)",
+    ))
 }
 
 /// Convert a snake_case lib name to PascalCase (e.g., "pika_core" → "PikaCore").
