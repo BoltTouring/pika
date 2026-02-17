@@ -41,6 +41,7 @@ fi
 
 need_cmd nak
 need_cmd tr
+need_cmd jq
 
 tag="$1"
 repo_url="${2:-$DEFAULT_REPO_URL}"
@@ -82,5 +83,29 @@ if [ "${#relays[@]}" -eq 0 ]; then
   exit 1
 fi
 
-NOSTR_SECRET_KEY="$sign_with" nak -q event -k 1 -c "$content" "${relays[@]}"
+event_json="$(NOSTR_SECRET_KEY="$sign_with" nak event -k 1 -c "$content" < /dev/null)"
+event_id="$(printf '%s' "$event_json" | jq -r '.id // empty')"
+if [ -z "$event_id" ]; then
+  echo "error: failed to derive announcement event id from nak output" >&2
+  exit 1
+fi
+
+printf '%s\n' "$event_json" | NOSTR_SECRET_KEY="$sign_with" nak -q event "${relays[@]}" >/dev/null
+
+published_on=""
+for relay in "${relays[@]}"; do
+  if nak -q req -i "$event_id" -l 1 "$relay" < /dev/null | jq -e --arg id "$event_id" 'select(.id == $id)' >/dev/null 2>&1; then
+    published_on="$relay"
+    break
+  fi
+done
+
+if [ -z "$published_on" ]; then
+  echo "error: announcement event was not retrievable from any target relay" >&2
+  echo "event_id=$event_id" >&2
+  printf 'relays=%s\n' "${relays[*]}" >&2
+  exit 1
+fi
+
+echo "ok: announcement published event_id=$event_id relay=$published_on"
 unset sign_with
