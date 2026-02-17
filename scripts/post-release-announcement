@@ -4,7 +4,7 @@ set +x
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEFAULT_REPO_URL="https://github.com/sledtools/pika"
-DEFAULT_ZAPSTORE_APP_URL="https://zapstore.dev/app/com.justinmoon.pika"
+DEFAULT_ZAPSTORE_APP_URL="https://zapstore.dev/apps/naddr1qqfkxmmd9e482um5d9hx6mm0dch8q6ttvyq3samnwvaz7tmjv4kxz7fw0fshqum5daex2tnyv4mqyg8g38vsur6pyts9uv5357r2sxujmyl54ugvetfduyvp80hgh6yzcspsgqqq0c9shze8tx"
 
 usage() {
   cat <<'USAGE'
@@ -15,7 +15,7 @@ Publishes a kind-1 Nostr release announcement for a Git tag release.
 Arguments:
   tag               Release tag (e.g. v0.2.5)
   repo-url          Optional repository URL (default: https://github.com/sledtools/pika)
-  zapstore-app-url  Optional Zapstore app URL (default: https://zapstore.dev/app/com.justinmoon.pika)
+  zapstore-app-url  Optional Zapstore app URL (default: https://zapstore.dev/apps/naddr1qqfkxmmd9e482um5d9hx6mm0dch8q6ttvyq3samnwvaz7tmjv4kxz7fw0fshqum5daex2tnyv4mqyg8g38vsur6pyts9uv5357r2sxujmyl54ugvetfduyvp80hgh6yzcspsgqqq0c9shze8tx)
 
 Environment:
   PIKA_ANNOUNCE_RELAYS  Space-delimited relay list override
