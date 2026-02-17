@@ -43,19 +43,6 @@ struct ContentView: View {
                             )
                         }
                     }
-                    .safeAreaInset(edge: .top) {
-                        if let call = appState.activeCall, call.status.isLive, !isCallScreenPresented {
-                            ActiveCallPill(
-                                call: call,
-                                peerName: callPeerDisplayName(for: call, in: appState),
-                                onTap: {
-                                    isCallScreenPresented = true
-                                }
-                            )
-                            .padding(.horizontal, 12)
-                            .padding(.top, 2)
-                        }
-                    }
                     .onAppear {
                         // Initial mount: seed the path from Rust.
                         navPath = manager.state.router.screenStack

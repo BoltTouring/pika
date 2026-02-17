@@ -68,6 +68,17 @@ struct ChatView: View {
     @ViewBuilder
     private func loadedChat(_ chat: ChatViewState) -> some View {
         VStack(spacing: 8) {
+            if let liveCall = callFor(chat), liveCall.status.isLive {
+                ActiveCallPill(
+                    call: liveCall,
+                    peerName: chatTitle(chat),
+                    onTap: {
+                        onOpenCallScreen()
+                    }
+                )
+                .padding(.horizontal, 12)
+                .padding(.top, 2)
+            }
             messageList(chat)
         }
         .modifier(FloatingInputBarModifier(content: { messageInputBar(chat: chat) }))
