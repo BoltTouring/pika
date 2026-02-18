@@ -60,7 +60,7 @@ enum Command {
     /// Long-running JSONL sidecar daemon intended to be embedded/invoked by OpenClaw.
     Daemon {
         /// Relay websocket URL(s), e.g. wss://relay.damus.io. Repeatable.
-        #[arg(long, default_value = "ws://127.0.0.1:18080")]
+        #[arg(long, default_value = "ws://127.0.0.1:18080", action = clap::ArgAction::Append)]
         relay: Vec<String>,
 
         /// Folder-local state directory (will be created if missing)
