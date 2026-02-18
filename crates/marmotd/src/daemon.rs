@@ -2399,44 +2399,60 @@ pub async fn daemon_main(
                             call_id: call_id.clone(),
                             text: text.clone(),
                         });
-                        if let Err(err) = publish_group_message(
-                            &client,
-                            &relay_urls,
-                            &mdk,
-                            &keys,
-                            &nostr_group_id,
-                            text.clone(),
-                            "call_transcript_final",
-                        )
-                        .await
-                        {
-                            warn!(
-                                "[marmotd] call transcript publish failed call_id={} group={} err={err:#}",
-                                call_id, nostr_group_id
-                            );
-                        }
 
-                        // Publish TTS audio response.
-                        match publish_tts_audio_response(
-                            &session,
-                            &media_crypto,
-                            start_seq,
-                            &text,
-                        ) {
-                            Ok(stats) => {
-                                if let Some(call) = active_call.as_mut().filter(|c| c.call_id == call_id) {
-                                    call.next_voice_seq = stats.next_seq;
-                                }
-                                tracing::info!(
-                                    "[marmotd] tts response published call_id={} frames={}",
-                                    call_id, stats.frames_published
+                        // When a controller (e.g. OpenClaw JS plugin) is connected via
+                        // stdin/stdout JSON-RPC, it owns the reply pipeline: it dispatches
+                        // the transcript to an LLM, runs TTS, and sends audio back via
+                        // SendAudioWav.  The daemon should NOT also publish a group text
+                        // message (which echoes the caller's speech as a chat bubble) or
+                        // run its own TTS (which would double-speak).
+                        //
+                        // The built-in TTS + group-message path is only useful for
+                        // standalone marmotd without a controller.  Detect the controller
+                        // by checking whether stdin is a pipe (i.e. spawned by a parent
+                        // process) vs a terminal.
+                        let has_controller = !atty::is(atty::Stream::Stdin);
+
+                        if !has_controller {
+                            if let Err(err) = publish_group_message(
+                                &client,
+                                &relay_urls,
+                                &mdk,
+                                &keys,
+                                &nostr_group_id,
+                                text.clone(),
+                                "call_transcript_final",
+                            )
+                            .await
+                            {
+                                warn!(
+                                    "[marmotd] call transcript publish failed call_id={} group={} err={err:#}",
+                                    call_id, nostr_group_id
                                 );
                             }
-                            Err(err) => {
-                                warn!(
-                                    "[marmotd] tts response failed call_id={} err={err:#}",
-                                    call_id
-                                );
+
+                            // Publish TTS audio response (standalone mode only).
+                            match publish_tts_audio_response(
+                                &session,
+                                &media_crypto,
+                                start_seq,
+                                &text,
+                            ) {
+                                Ok(stats) => {
+                                    if let Some(call) = active_call.as_mut().filter(|c| c.call_id == call_id) {
+                                        call.next_voice_seq = stats.next_seq;
+                                    }
+                                    tracing::info!(
+                                        "[marmotd] tts response published call_id={} frames={}",
+                                        call_id, stats.frames_published
+                                    );
+                                }
+                                Err(err) => {
+                                    warn!(
+                                        "[marmotd] tts response failed call_id={} err={err:#}",
+                                        call_id
+                                    );
+                                }
                             }
                         }
                     }
