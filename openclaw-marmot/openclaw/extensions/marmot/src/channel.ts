@@ -690,8 +690,7 @@ export const marmotPlugin: ChannelPlugin<ResolvedMarmotAccount> = {
       const isGroupAllowed = (nostrGroupId: string): boolean => {
         if (groupPolicy === "open") return true;
         const gid = String(nostrGroupId).trim().toLowerCase();
-        // Exact match or wildcard fallback
-        return Boolean(allowedGroups[gid] || allowedGroups["*"]);
+        return Boolean(allowedGroups[gid]);
       };
       const isSenderAllowed = (pubkey: string): boolean => {
         if (groupAllowFrom.length === 0) return true;
