@@ -1772,6 +1772,11 @@ fn parse_relay_list(relay: &str, relays_override: &[String]) -> anyhow::Result<V
     Ok(out)
 }
 
+fn is_typing_indicator(msg: &mdk_storage_traits::messages::types::Message) -> bool {
+    msg.kind == Kind::ApplicationSpecificData
+        && msg.content == "typing"
+}
+
 fn event_h_tag_hex(ev: &Event) -> Option<String> {
     for t in ev.tags.iter() {
         if t.kind() == TagKind::h()
@@ -2060,6 +2065,9 @@ pub async fn daemon_main(
                                                     }
                                                     if let Ok(MessageProcessingResult::ApplicationMessage(msg)) = mdk.process_message(ev) {
                                                         if !sender_allowed(&msg.pubkey.to_hex()) {
+                                                            continue;
+                                                        }
+                                                        if is_typing_indicator(&msg) {
                                                             continue;
                                                         }
                                                         out_tx.send(OutMsg::MessageReceived{
@@ -2796,6 +2804,9 @@ pub async fn daemon_main(
                                         }
                                     }
                                 }
+                                continue;
+                            }
+                            if is_typing_indicator(&msg) {
                                 continue;
                             }
                             out_tx.send(OutMsg::MessageReceived {
