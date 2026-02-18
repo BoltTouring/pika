@@ -7,15 +7,16 @@ options:
 
 settings:
   base:
-    # Note: device builds still need a valid DEVELOPMENT_TEAM; we keep that out of git and
-    # pass it via env from tools/run-ios.
-    PRODUCT_BUNDLE_IDENTIFIER: com.justinmoon.pika
+    # PIKA_APP_BUNDLE_ID is the "root" bundle id; targets derive from it.
+    # Override on the xcodebuild command line (run-ios does this automatically).
+    PIKA_APP_BUNDLE_ID: com.justinmoon.pika
+    PRODUCT_BUNDLE_IDENTIFIER: $(PIKA_APP_BUNDLE_ID)
+    # PIKA_APP_GROUP: derived from bundle ID. Override via xcodebuild if needed.
+    PIKA_APP_GROUP: "group.$(PIKA_APP_BUNDLE_ID)"
+    CODE_SIGN_STYLE: Automatic
     MARKETING_VERSION: 0.1.0
     CURRENT_PROJECT_VERSION: 1
     SWIFT_VERSION: 5.0
-  configs:
-    Debug:
-      PRODUCT_BUNDLE_IDENTIFIER: com.justinmoon.pika.dev
 
 packages:
   MarkdownUI:
@@ -38,10 +39,31 @@ targets:
         INFOPLIST_FILE: Info.plist
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: YES
+        CODE_SIGN_ENTITLEMENTS: Pika.entitlements
     dependencies:
       - framework: Frameworks/PikaCore.xcframework
         embed: false
       - package: MarkdownUI
+      - target: PikaNotificationService
+
+  PikaNotificationService:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: NotificationService
+      - path: NSEBindings
+        excludes:
+          - "*.h"
+          - "*.modulemap"
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_FILE: NotificationService/Info.plist
+        CODE_SIGN_ENTITLEMENTS: NotificationService/NotificationService.entitlements
+        PRODUCT_BUNDLE_IDENTIFIER: $(PIKA_APP_BUNDLE_ID).notification-service
+    dependencies:
+      - framework: Frameworks/PikaNSE.xcframework
+        embed: false
 
   PikaTests:
     type: bundle.unit-test

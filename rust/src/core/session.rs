@@ -14,7 +14,7 @@ impl AppCore {
         tracing::info!(pubkey = %pubkey_hex, npub = %npub, "start_session");
 
         // MDK per-identity encrypted sqlite DB.
-        let mdk = open_mdk(&self.data_dir, &pubkey)?;
+        let mdk = open_mdk(&self.data_dir, &pubkey, &self.keychain_group)?;
         tracing::info!("mdk opened");
 
         let client = Client::new(keys.clone());
@@ -69,7 +69,29 @@ impl AppCore {
             self.recompute_subscriptions();
         }
 
+        self.register_push_device();
+
         Ok(())
+    }
+
+    /// Re-open the MDK database to pick up any ratchet state changes made by the
+    /// Notification Service Extension while the app was in the background.
+    pub(super) fn reopen_mdk(&mut self) {
+        let Some(sess) = self.session.as_mut() else {
+            return;
+        };
+        match open_mdk(
+            &self.data_dir,
+            &sess.keys.public_key(),
+            &self.keychain_group,
+        ) {
+            Ok(new_mdk) => {
+                sess.mdk = new_mdk;
+            }
+            Err(e) => {
+                tracing::warn!(%e, "failed to reopen mdk");
+            }
+        }
     }
 
     pub(super) fn stop_session(&mut self) {

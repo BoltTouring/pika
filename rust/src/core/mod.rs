@@ -3,6 +3,7 @@ mod call_runtime;
 mod config;
 mod interop;
 mod profile;
+mod push;
 mod session;
 mod storage;
 
@@ -103,6 +104,7 @@ pub struct AppCore {
     shared_state: Arc<RwLock<crate::state::AppState>>,
 
     data_dir: String,
+    keychain_group: String,
     config: config::AppConfig,
     runtime: tokio::runtime::Runtime,
 
@@ -127,6 +129,13 @@ pub struct AppCore {
 
     // Archived chat IDs -- hidden from the chat list but data stays in MDK.
     archived_chats: HashSet<String>,
+
+    // Push notification state.
+    http_client: reqwest::Client,
+    push_device_id: String,
+    push_apns_token: Option<String>,
+    push_subscribed_chat_ids: HashSet<String>,
+
     call_runtime: call_runtime::CallRuntime,
     call_session_params: Option<call_control::CallSessionParams>,
     call_timeline_logged_keys: HashSet<String>,
@@ -137,6 +146,7 @@ impl AppCore {
         update_sender: Sender<AppUpdate>,
         core_sender: Sender<CoreMsg>,
         data_dir: String,
+        keychain_group: String,
         shared_state: Arc<RwLock<crate::state::AppState>>,
     ) -> Self {
         let config = config::load_app_config(&data_dir);
@@ -157,6 +167,9 @@ impl AppCore {
             .filter(|s| !s.is_empty())
             .map(ToString::to_string);
 
+        let push_device_id = Self::load_or_create_push_device_id(&data_dir);
+        let push_subscribed_chat_ids = Self::load_push_subscriptions(&data_dir);
+
         let this = Self {
             state,
             rev: 0,
@@ -166,6 +179,7 @@ impl AppCore {
             core_sender,
             shared_state,
             data_dir,
+            keychain_group,
             config,
             runtime,
             session: None,
@@ -180,6 +194,10 @@ impl AppCore {
             profiles: HashMap::new(),
             my_metadata: None,
             archived_chats: HashSet::new(),
+            http_client: reqwest::Client::new(),
+            push_device_id,
+            push_apns_token: None,
+            push_subscribed_chat_ids,
             call_runtime: call_runtime::CallRuntime::default(),
             call_session_params: None,
             call_timeline_logged_keys: HashSet::new(),
@@ -579,6 +597,12 @@ impl AppCore {
                         error.clone().unwrap_or_else(|| "unknown error".into())
                     ));
                 }
+            }
+            InternalEvent::PushSubscriptionsSynced { groups } => {
+                self.handle_push_subscriptions_synced(groups);
+            }
+            InternalEvent::PushUnsubscriptionsSynced { groups } => {
+                self.handle_push_unsubscriptions_synced(groups);
             }
             InternalEvent::PublishMessageResult {
                 chat_id,
@@ -1259,6 +1283,7 @@ impl AppCore {
                         tracing::info!(path = %db_path.display(), "deleted mdk db on logout");
                     }
                 }
+                self.clear_push_subscriptions();
                 self.stop_session();
                 self.state.auth = AuthState::LoggedOut;
                 self.emit_auth();
@@ -1327,9 +1352,13 @@ impl AppCore {
                     self.emit_toast();
                 }
             }
+            AppAction::SetPushToken { token } => {
+                self.set_push_token(token);
+            }
             AppAction::Foregrounded => {
                 // Native should send lifecycle signals as actions. Rust owns all state changes.
                 if self.is_logged_in() {
+                    self.reopen_mdk(); // Pick up NSE's ratchet changes
                     self.refresh_all_from_storage();
                     self.refresh_my_profile(false);
                     self.refresh_follow_list();
