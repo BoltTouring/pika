@@ -33,7 +33,8 @@ impl AvatarCache {
     }
 
     fn get_or_load(&mut self, path: &str, size: u32) -> Option<image::Handle> {
-        if let Some(handle) = self.handles.get(path) {
+        let key = format!("{path}@{size}");
+        if let Some(handle) = self.handles.get(&key) {
             return Some(handle.clone());
         }
 
@@ -44,7 +45,7 @@ impl AvatarCache {
         self.spent += 1;
 
         let handle = load_circular_image(path, size)?;
-        self.handles.insert(path.to_string(), handle.clone());
+        self.handles.insert(key, handle.clone());
         Some(handle)
     }
 }

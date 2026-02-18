@@ -90,7 +90,6 @@ pub fn secondary_button_style(_theme: &Theme, status: button::Status) -> button:
     }
 }
 
-#[allow(dead_code)]
 pub fn danger_button_style(_theme: &Theme, status: button::Status) -> button::Style {
     let bg = match status {
         button::Status::Hovered => Color::from_rgb(0.85, 0.25, 0.20),

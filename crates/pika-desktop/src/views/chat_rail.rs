@@ -11,6 +11,9 @@ pub fn chat_rail_view<'a>(
     chat_list: &[ChatSummary],
     selected_id: Option<&str>,
     show_new_chat_form: bool,
+    show_new_group_form: bool,
+    show_my_profile: bool,
+    my_picture_url: Option<&str>,
     avatar_cache: &mut super::avatar::AvatarCache,
 ) -> Element<'a, Message, Theme> {
     // ── Header ──────────────────────────────────────────────────────
@@ -20,14 +23,25 @@ pub fn chat_rail_view<'a>(
         theme::secondary_button_style
     };
 
+    let new_group_style = if show_new_group_form {
+        theme::primary_button_style
+    } else {
+        theme::secondary_button_style
+    };
+
     let header = row![
         text("Chats").size(20).color(theme::TEXT_PRIMARY),
         Space::new().width(Fill),
-        button(text("+").size(18).color(theme::TEXT_PRIMARY).center())
+        button(text("Chat +").size(12).color(theme::TEXT_PRIMARY).center())
             .on_press(Message::ToggleNewChatForm)
-            .padding([4, 10])
+            .padding([4, 8])
             .style(new_chat_style),
+        button(text("Group +").size(12).color(theme::TEXT_PRIMARY).center())
+            .on_press(Message::ToggleNewGroupForm)
+            .padding([4, 8])
+            .style(new_group_style),
     ]
+    .spacing(4)
     .align_y(Alignment::Center)
     .padding([0, 4]);
 
@@ -41,24 +55,26 @@ pub fn chat_rail_view<'a>(
 
     rail = rail.push(scrollable(chat_items).height(Fill));
 
-    // Logout button at bottom
+    // Profile button at bottom
+    let profile_style = if show_my_profile {
+        theme::primary_button_style
+    } else {
+        theme::secondary_button_style
+    };
+
+    let profile_btn_content = row![
+        avatar_circle(Some("Me"), my_picture_url, 24.0, avatar_cache),
+        text("My Profile").size(13).color(theme::TEXT_PRIMARY),
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center);
+
     rail = rail.push(
-        button(text("Logout").size(13).color(theme::DANGER).center())
-            .on_press(Message::Logout)
+        button(profile_btn_content)
+            .on_press(Message::ToggleMyProfile)
             .width(Fill)
-            .padding([8, 0])
-            .style(|_theme: &Theme, status: button::Status| {
-                let bg = match status {
-                    button::Status::Hovered => theme::HOVER_BG,
-                    _ => iced::Color::TRANSPARENT,
-                };
-                button::Style {
-                    background: Some(iced::Background::Color(bg)),
-                    text_color: theme::DANGER,
-                    border: iced::border::rounded(6),
-                    ..Default::default()
-                }
-            }),
+            .padding([6, 8])
+            .style(profile_style),
     );
 
     container(rail)
@@ -107,9 +123,10 @@ fn chat_item<'a>(chat: &ChatSummary, selected_id: Option<&str>, avatar_cache: &m
     .align_y(Alignment::Center);
 
     // Preview + optional badge
-    let mut bottom_row = row![text(theme::truncate(preview, 28))
+    let mut bottom_row = row![text(theme::truncate(preview, 24))
         .size(12)
-        .color(theme::TEXT_SECONDARY)]
+        .color(theme::TEXT_SECONDARY)
+        .wrapping(text::Wrapping::None)]
     .align_y(Alignment::Center);
 
     if chat.unread_count > 0 {

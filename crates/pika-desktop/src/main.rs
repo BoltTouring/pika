@@ -36,6 +36,18 @@ struct DesktopApp {
     message_input: String,
     show_new_chat_form: bool,
     selected_chat_id: Option<String>,
+    // Group creation
+    show_new_group_form: bool,
+    group_name_input: String,
+    selected_group_members: Vec<String>,
+    // My profile
+    show_my_profile: bool,
+    profile_name_draft: String,
+    profile_about_draft: String,
+    // Group info
+    show_group_info: bool,
+    group_info_name_draft: String,
+    group_info_npub_input: String,
 }
 
 #[derive(Debug, Clone)]
@@ -54,6 +66,27 @@ pub enum Message {
     MessageChanged(String),
     SendMessage,
     ClearToast,
+    // Group creation
+    ToggleNewGroupForm,
+    GroupNameChanged(String),
+    ToggleGroupMember(String),
+    AddManualGroupMember,
+    CreateGroup,
+    // My profile
+    ToggleMyProfile,
+    ProfileNameChanged(String),
+    ProfileAboutChanged(String),
+    SaveProfile,
+    CopyNpub,
+    // Group info
+    ShowGroupInfo,
+    CloseGroupInfo,
+    GroupInfoNameChanged(String),
+    RenameGroup,
+    AddGroupMember,
+    RemoveGroupMember(String),
+    LeaveGroup,
+    GroupInfoNpubChanged(String),
 }
 
 impl DesktopApp {
@@ -78,6 +111,15 @@ impl DesktopApp {
                         message_input: String::new(),
                         show_new_chat_form: false,
                         selected_chat_id: None,
+                        show_new_group_form: false,
+                        group_name_input: String::new(),
+                        selected_group_members: Vec::new(),
+                        show_my_profile: false,
+                        profile_name_draft: String::new(),
+                        profile_about_draft: String::new(),
+                        show_group_info: false,
+                        group_info_name_draft: String::new(),
+                        group_info_npub_input: String::new(),
                     },
                     Task::none(),
                 )
@@ -96,6 +138,15 @@ impl DesktopApp {
                     message_input: String::new(),
                     show_new_chat_form: false,
                     selected_chat_id: None,
+                    show_new_group_form: false,
+                    group_name_input: String::new(),
+                    selected_group_members: Vec::new(),
+                    show_my_profile: false,
+                    profile_name_draft: String::new(),
+                    profile_about_draft: String::new(),
+                    show_group_info: false,
+                    group_info_name_draft: String::new(),
+                    group_info_npub_input: String::new(),
                 },
                 Task::none(),
             ),
@@ -133,13 +184,33 @@ impl DesktopApp {
                         if latest.current_chat.is_none() {
                             self.selected_chat_id = None;
                         }
+                        // Close new-group form once creating_chat finishes
+                        if self.state.busy.creating_chat
+                            && !latest.busy.creating_chat
+                            && self.show_new_group_form
+                        {
+                            self.clear_all_overlays();
+                        }
+
+                        // Sync my_profile drafts when profile state updates
+                        if self.show_my_profile
+                            && self.state.my_profile.name != latest.my_profile.name
+                        {
+                            self.profile_name_draft = latest.my_profile.name.clone();
+                            self.profile_about_draft = latest.my_profile.about.clone();
+                        }
+
                         self.state = latest;
-                        if self.show_new_chat_form {
+                        let needs_follows =
+                            self.show_new_chat_form || self.show_new_group_form;
+                        if needs_follows {
                             self.refilter_follows();
                         }
                     }
                     // Retry outside the manager borrow
-                    if self.show_new_chat_form
+                    let needs_follows =
+                        self.show_new_chat_form || self.show_new_group_form;
+                    if needs_follows
                         && self.state.follow_list.is_empty()
                         && !self.state.busy.fetching_follow_list
                     {
@@ -166,7 +237,7 @@ impl DesktopApp {
                 }
                 self.avatar_cache.borrow_mut().clear();
                 self.selected_chat_id = None;
-                self.show_new_chat_form = false;
+                self.clear_all_overlays();
             }
             Message::NewChatChanged(value) => self.new_chat_input = value,
             Message::NewChatSearchChanged(value) => {
@@ -174,12 +245,13 @@ impl DesktopApp {
                 self.refilter_follows();
             }
             Message::ToggleNewChatForm => {
-                self.show_new_chat_form = !self.show_new_chat_form;
+                let opening = !self.show_new_chat_form;
+                self.clear_all_overlays();
+                self.show_new_chat_form = opening;
                 if !self.show_new_chat_form {
                     self.new_chat_input.clear();
                     self.new_chat_search.clear();
                 }
-                // Refresh follow list when opening
                 if self.show_new_chat_form {
                     self.refilter_follows();
                     if let Some(manager) = &self.manager {
@@ -205,7 +277,7 @@ impl DesktopApp {
             }
             Message::OpenChat(chat_id) => {
                 self.selected_chat_id = Some(chat_id.clone());
-                self.show_new_chat_form = false;
+                self.clear_all_overlays();
                 if let Some(manager) = &self.manager {
                     manager.dispatch(AppAction::OpenChat { chat_id });
                 }
@@ -230,6 +302,137 @@ impl DesktopApp {
                 if let Some(manager) = &self.manager {
                     manager.dispatch(AppAction::ClearToast);
                 }
+            }
+
+            // ── Group creation ────────────────────────────────────────
+            Message::ToggleNewGroupForm => {
+                let opening = !self.show_new_group_form;
+                self.clear_all_overlays();
+                self.show_new_group_form = opening;
+                if opening {
+                    self.refilter_follows();
+                    if let Some(manager) = &self.manager {
+                        manager.dispatch(AppAction::RefreshFollowList);
+                    }
+                }
+            }
+            Message::GroupNameChanged(value) => self.group_name_input = value,
+            Message::ToggleGroupMember(npub) => {
+                if let Some(pos) = self.selected_group_members.iter().position(|n| n == &npub) {
+                    self.selected_group_members.remove(pos);
+                } else {
+                    self.selected_group_members.push(npub);
+                }
+            }
+            Message::AddManualGroupMember => {
+                let npub = self.new_chat_input.trim().to_string();
+                if !npub.is_empty() && !self.selected_group_members.contains(&npub) {
+                    self.selected_group_members.push(npub);
+                    self.new_chat_input.clear();
+                }
+            }
+            Message::CreateGroup => {
+                if self.selected_group_members.is_empty() {
+                    return Task::none();
+                }
+                if let Some(manager) = &self.manager {
+                    manager.dispatch(AppAction::CreateGroupChat {
+                        peer_npubs: self.selected_group_members.clone(),
+                        group_name: self.group_name_input.clone(),
+                    });
+                }
+                self.clear_all_overlays();
+            }
+
+            // ── My profile ────────────────────────────────────────────
+            Message::ToggleMyProfile => {
+                let opening = !self.show_my_profile;
+                self.clear_all_overlays();
+                self.show_my_profile = opening;
+                if opening {
+                    self.profile_name_draft = self.state.my_profile.name.clone();
+                    self.profile_about_draft = self.state.my_profile.about.clone();
+                    if let Some(manager) = &self.manager {
+                        manager.dispatch(AppAction::RefreshMyProfile);
+                    }
+                }
+            }
+            Message::ProfileNameChanged(value) => self.profile_name_draft = value,
+            Message::ProfileAboutChanged(value) => self.profile_about_draft = value,
+            Message::SaveProfile => {
+                if let Some(manager) = &self.manager {
+                    manager.dispatch(AppAction::SaveMyProfile {
+                        name: self.profile_name_draft.clone(),
+                        about: self.profile_about_draft.clone(),
+                    });
+                }
+            }
+            Message::CopyNpub => {
+                if let AuthState::LoggedIn { ref npub, .. } = self.state.auth {
+                    return iced::clipboard::write(npub.clone());
+                }
+            }
+
+            // ── Group info ────────────────────────────────────────────
+            Message::ShowGroupInfo => {
+                self.clear_all_overlays();
+                self.show_group_info = true;
+                if let Some(chat) = &self.state.current_chat {
+                    self.group_info_name_draft =
+                        chat.group_name.clone().unwrap_or_default();
+                }
+            }
+            Message::CloseGroupInfo => {
+                self.show_group_info = false;
+                self.group_info_npub_input.clear();
+            }
+            Message::GroupInfoNameChanged(value) => self.group_info_name_draft = value,
+            Message::RenameGroup => {
+                if let Some(chat) = &self.state.current_chat {
+                    if let Some(manager) = &self.manager {
+                        manager.dispatch(AppAction::RenameGroup {
+                            chat_id: chat.chat_id.clone(),
+                            name: self.group_info_name_draft.clone(),
+                        });
+                    }
+                }
+            }
+            Message::GroupInfoNpubChanged(value) => self.group_info_npub_input = value,
+            Message::AddGroupMember => {
+                let npub = self.group_info_npub_input.trim().to_string();
+                if npub.is_empty() {
+                    return Task::none();
+                }
+                if let Some(chat) = &self.state.current_chat {
+                    if let Some(manager) = &self.manager {
+                        manager.dispatch(AppAction::AddGroupMembers {
+                            chat_id: chat.chat_id.clone(),
+                            peer_npubs: vec![npub],
+                        });
+                    }
+                }
+                self.group_info_npub_input.clear();
+            }
+            Message::RemoveGroupMember(pubkey) => {
+                if let Some(chat) = &self.state.current_chat {
+                    if let Some(manager) = &self.manager {
+                        manager.dispatch(AppAction::RemoveGroupMembers {
+                            chat_id: chat.chat_id.clone(),
+                            member_pubkeys: vec![pubkey],
+                        });
+                    }
+                }
+            }
+            Message::LeaveGroup => {
+                if let Some(chat) = &self.state.current_chat {
+                    if let Some(manager) = &self.manager {
+                        manager.dispatch(AppAction::LeaveGroup {
+                            chat_id: chat.chat_id.clone(),
+                        });
+                    }
+                }
+                self.clear_all_overlays();
+                self.selected_chat_id = None;
             }
         }
 
@@ -281,15 +484,58 @@ impl DesktopApp {
         cache.reset_budget();
 
         // Chat rail (left sidebar)
+        let my_profile_pic = self.state.my_profile.picture_url.as_deref();
         let rail = views::chat_rail::chat_rail_view(
             &self.state.chat_list,
             self.selected_chat_id.as_deref(),
             self.show_new_chat_form,
+            self.show_new_group_form,
+            self.show_my_profile,
+            my_profile_pic,
             cache,
         );
 
-        // Center pane: new chat, conversation, or empty state
-        let center_pane: Element<'_, Message> = if self.show_new_chat_form {
+        // Center pane routing (mutually exclusive overlays)
+        let center_pane: Element<'_, Message> = if self.show_my_profile {
+            let npub = match &self.state.auth {
+                AuthState::LoggedIn { npub, .. } => npub.as_str(),
+                _ => "",
+            };
+            views::my_profile::my_profile_view(
+                &self.profile_name_draft,
+                &self.profile_about_draft,
+                npub,
+                self.state.my_profile.picture_url.as_deref(),
+                cache,
+            )
+        } else if self.show_group_info {
+            if let Some(chat) = &self.state.current_chat {
+                let my_pubkey = match &self.state.auth {
+                    AuthState::LoggedIn { pubkey, .. } => pubkey.as_str(),
+                    _ => "",
+                };
+                views::group_info::group_info_view(
+                    chat,
+                    &self.group_info_name_draft,
+                    &self.group_info_npub_input,
+                    my_pubkey,
+                    cache,
+                )
+            } else {
+                views::empty_state::empty_state_view()
+            }
+        } else if self.show_new_group_form {
+            views::new_group_chat::new_group_chat_view(
+                &self.filtered_follows,
+                &self.group_name_input,
+                &self.new_chat_input,
+                &self.selected_group_members,
+                self.state.busy.creating_chat,
+                self.state.busy.fetching_follow_list,
+                &self.new_chat_search,
+                cache,
+            )
+        } else if self.show_new_chat_form {
             views::new_chat::new_chat_view(
                 &self.filtered_follows,
                 &self.new_chat_input,
@@ -326,6 +572,18 @@ impl DesktopApp {
                 .to_string();
         }
         ".pika-desktop".to_string()
+    }
+
+    fn clear_all_overlays(&mut self) {
+        self.show_new_chat_form = false;
+        self.show_new_group_form = false;
+        self.show_my_profile = false;
+        self.show_group_info = false;
+        self.new_chat_input.clear();
+        self.new_chat_search.clear();
+        self.group_name_input.clear();
+        self.selected_group_members.clear();
+        self.group_info_npub_input.clear();
     }
 
     fn refilter_follows(&mut self) {

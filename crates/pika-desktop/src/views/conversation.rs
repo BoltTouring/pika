@@ -35,17 +35,41 @@ pub fn conversation_view<'a>(
         .first()
         .and_then(|m| m.picture_url.as_deref());
 
-    let header = container(
-        row![
-            avatar_circle(Some(&*title), picture_url, 36.0, avatar_cache),
-            header_info,
-        ]
-        .spacing(10)
-        .align_y(Alignment::Center)
-        .padding([8, 16]),
-    )
-    .width(Fill)
-    .style(theme::header_bar_style);
+    let header_content = row![
+        avatar_circle(Some(&*title), picture_url, 36.0, avatar_cache),
+        header_info,
+    ]
+    .spacing(10)
+    .align_y(Alignment::Center)
+    .padding([8, 16]);
+
+    // Make group headers clickable to show group info
+    let header: Element<'a, Message, Theme> = if chat.is_group {
+        container(
+            button(header_content)
+                .on_press(Message::ShowGroupInfo)
+                .width(Fill)
+                .style(|_: &Theme, status: button::Status| {
+                    let bg = match status {
+                        button::Status::Hovered => theme::HOVER_BG,
+                        _ => theme::RAIL_BG,
+                    };
+                    button::Style {
+                        background: Some(iced::Background::Color(bg)),
+                        text_color: theme::TEXT_PRIMARY,
+                        border: iced::border::rounded(0),
+                        ..Default::default()
+                    }
+                }),
+        )
+        .width(Fill)
+        .into()
+    } else {
+        container(header_content)
+            .width(Fill)
+            .style(theme::header_bar_style)
+            .into()
+    };
 
     // ── Messages ────────────────────────────────────────────────────
     let is_group = chat.is_group;
