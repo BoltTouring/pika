@@ -23,6 +23,16 @@ fn dark_theme(_state: &DesktopApp) -> Theme {
     Theme::Dark
 }
 
+fn manager_update_stream(manager: &AppManager) -> impl iced::futures::Stream<Item = ()> {
+    let rx = manager.subscribe_updates();
+    iced::futures::stream::unfold(rx, |rx| async move {
+        match rx.recv_async().await {
+            Ok(()) => Some(((), rx)),
+            Err(_) => None,
+        }
+    })
+}
+
 struct DesktopApp {
     manager: Option<AppManager>,
     boot_error: Option<String>,
@@ -52,7 +62,8 @@ struct DesktopApp {
 
 #[derive(Debug, Clone)]
 pub enum Message {
-    Tick,
+    CoreUpdated,
+    RelativeTimeTick,
     NsecChanged(String),
     Login,
     CreateAccount,
@@ -92,7 +103,7 @@ pub enum Message {
 impl DesktopApp {
     fn new() -> (Self, Task<Message>) {
         let data_dir = app_manager::resolve_data_dir()
-            .unwrap_or_else(|_| std::path::PathBuf::from(".pika-desktop"))
+            .unwrap_or_else(|_| std::path::PathBuf::from(".pika"))
             .to_string_lossy()
             .to_string();
         let cached_profiles = pika_core::load_cached_profiles(&data_dir);
@@ -116,8 +127,13 @@ impl DesktopApp {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        if self.manager.is_some() {
-            iced::time::every(Duration::from_millis(150)).map(|_| Message::Tick)
+        if let Some(manager) = &self.manager {
+            let core_updates = Subscription::run_with(manager.clone(), manager_update_stream)
+                .map(|_| Message::CoreUpdated);
+            let relative_time_ticks =
+                iced::time::every(Duration::from_secs(30)).map(|_| Message::RelativeTimeTick);
+
+            Subscription::batch([core_updates, relative_time_ticks])
         } else {
             Subscription::none()
         }
@@ -125,61 +141,8 @@ impl DesktopApp {
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::Tick => {
-                if let Some(manager) = &self.manager {
-                    let latest = manager.state();
-                    if latest.rev != self.state.rev {
-                        // On login transition, dispatch Foregrounded to load profiles
-                        let was_logged_out = matches!(self.state.auth, AuthState::LoggedOut);
-                        let now_logged_in = matches!(latest.auth, AuthState::LoggedIn { .. });
-                        if was_logged_out && now_logged_in {
-                            manager.dispatch(AppAction::Foregrounded);
-                        }
-
-                        // Close new-chat form once creating_chat finishes
-                        if self.state.busy.creating_chat && !latest.busy.creating_chat {
-                            self.show_new_chat_form = false;
-                            self.new_chat_input.clear();
-                        }
-
-                        // Sync selected_chat_id if core's current_chat changed
-                        if latest.current_chat.is_none() {
-                            self.selected_chat_id = None;
-                        }
-                        // Close new-group form once creating_chat finishes
-                        if self.state.busy.creating_chat
-                            && !latest.busy.creating_chat
-                            && self.show_new_group_form
-                        {
-                            self.clear_all_overlays();
-                        }
-
-                        // Sync my_profile drafts when profile state updates
-                        if self.show_my_profile
-                            && self.state.my_profile.name != latest.my_profile.name
-                        {
-                            self.profile_name_draft = latest.my_profile.name.clone();
-                            self.profile_about_draft = latest.my_profile.about.clone();
-                        }
-
-                        self.state = latest;
-                        let needs_follows = self.show_new_chat_form || self.show_new_group_form;
-                        if needs_follows {
-                            self.refilter_follows();
-                        }
-                    }
-                    // Retry outside the manager borrow
-                    let needs_follows = self.show_new_chat_form || self.show_new_group_form;
-                    if needs_follows
-                        && self.state.follow_list.is_empty()
-                        && !self.state.busy.fetching_follow_list
-                    {
-                        if let Some(manager) = &self.manager {
-                            manager.dispatch(AppAction::RefreshFollowList);
-                        }
-                    }
-                }
-            }
+            Message::CoreUpdated => self.sync_from_manager(),
+            Message::RelativeTimeTick => self.retry_follow_list_if_needed(),
             Message::NsecChanged(nsec) => self.nsec_input = nsec,
             Message::Login => {
                 if let Some(manager) = &self.manager {
@@ -233,7 +196,7 @@ impl DesktopApp {
                     manager.dispatch(AppAction::CreateChat { peer_npub });
                 }
                 // Keep form open — it will show a loading state via busy.creating_chat.
-                // Form closes when the tick detects creating_chat went false.
+                // Form closes when the next core state update reports completion.
             }
             Message::OpenChat(chat_id) => {
                 self.selected_chat_id = Some(chat_id.clone());
@@ -557,6 +520,66 @@ impl DesktopApp {
             show_group_info: false,
             group_info_name_draft: String::new(),
             group_info_npub_input: String::new(),
+        }
+    }
+
+    fn sync_from_manager(&mut self) {
+        let Some(manager) = &self.manager else {
+            return;
+        };
+
+        let latest = manager.state();
+        if latest.rev != self.state.rev {
+            // On login transition, dispatch Foregrounded to load profiles.
+            let was_logged_out = matches!(self.state.auth, AuthState::LoggedOut);
+            let now_logged_in = matches!(latest.auth, AuthState::LoggedIn { .. });
+            if was_logged_out && now_logged_in {
+                manager.dispatch(AppAction::Foregrounded);
+            }
+
+            // Close new-chat form once creating_chat finishes.
+            if self.state.busy.creating_chat && !latest.busy.creating_chat {
+                self.show_new_chat_form = false;
+                self.new_chat_input.clear();
+            }
+
+            // Sync selected_chat_id if core's current_chat changed.
+            if latest.current_chat.is_none() {
+                self.selected_chat_id = None;
+            }
+
+            // Close new-group form once creating_chat finishes.
+            if self.state.busy.creating_chat
+                && !latest.busy.creating_chat
+                && self.show_new_group_form
+            {
+                self.clear_all_overlays();
+            }
+
+            // Sync my_profile drafts when profile state updates.
+            if self.show_my_profile && self.state.my_profile.name != latest.my_profile.name {
+                self.profile_name_draft = latest.my_profile.name.clone();
+                self.profile_about_draft = latest.my_profile.about.clone();
+            }
+
+            self.state = latest;
+            if self.show_new_chat_form || self.show_new_group_form {
+                self.refilter_follows();
+            }
+        }
+
+        self.retry_follow_list_if_needed();
+    }
+
+    fn retry_follow_list_if_needed(&self) {
+        let needs_follows = self.show_new_chat_form || self.show_new_group_form;
+        if needs_follows
+            && self.state.follow_list.is_empty()
+            && !self.state.busy.fetching_follow_list
+        {
+            if let Some(manager) = &self.manager {
+                manager.dispatch(AppAction::RefreshFollowList);
+            }
         }
     }
 

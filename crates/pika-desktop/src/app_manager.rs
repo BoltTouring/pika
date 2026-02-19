@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 
 use flume::Sender;
@@ -10,10 +10,17 @@ pub struct AppManager {
     inner: Arc<Inner>,
 }
 
+impl std::hash::Hash for AppManager {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::ptr::hash(Arc::as_ptr(&self.inner), state);
+    }
+}
+
 struct Inner {
     core: Arc<FfiApp>,
     model: RwLock<ManagerModel>,
     nsec_store: FileNsecStore,
+    subscribers: Mutex<Vec<Sender<()>>>,
 }
 
 struct ManagerModel {
@@ -33,7 +40,7 @@ impl ManagerModel {
         }
     }
 
-    fn apply_update(&mut self, update: AppUpdate, nsec_store: &FileNsecStore) {
+    fn apply_update(&mut self, update: AppUpdate, nsec_store: &FileNsecStore) -> bool {
         let update_rev = match &update {
             AppUpdate::FullState(state) => state.rev,
             AppUpdate::AccountCreated { rev, .. } => *rev,
@@ -47,7 +54,7 @@ impl ManagerModel {
         }
 
         if update_rev <= self.last_rev_applied {
-            return;
+            return false;
         }
 
         self.last_rev_applied = update_rev;
@@ -82,6 +89,8 @@ impl ManagerModel {
                 self.state.rev = rev;
             }
         }
+
+        true
     }
 }
 
@@ -98,6 +107,7 @@ impl AppManager {
             core: core.clone(),
             model: RwLock::new(ManagerModel::new(initial)),
             nsec_store,
+            subscribers: Mutex::new(Vec::new()),
         });
 
         let (update_tx, update_rx) = flume::unbounded::<AppUpdate>();
@@ -135,6 +145,10 @@ impl AppManager {
         self.inner.core.dispatch(action);
     }
 
+    pub fn subscribe_updates(&self) -> flume::Receiver<()> {
+        self.inner.subscribe_updates()
+    }
+
     pub fn login_with_nsec(&self, nsec: String) {
         let nsec = nsec.trim().to_string();
         {
@@ -157,7 +171,24 @@ impl AppManager {
 impl Inner {
     fn apply_update(&self, update: AppUpdate) {
         let mut model = write_model(&self.model);
-        model.apply_update(update, &self.nsec_store);
+        let changed = model.apply_update(update, &self.nsec_store);
+        drop(model);
+
+        if changed {
+            self.notify_subscribers();
+        }
+    }
+
+    fn subscribe_updates(&self) -> flume::Receiver<()> {
+        let (tx, rx) = flume::unbounded();
+        let mut subscribers = lock_subscribers(&self.subscribers);
+        subscribers.push(tx);
+        rx
+    }
+
+    fn notify_subscribers(&self) {
+        let mut subscribers = lock_subscribers(&self.subscribers);
+        subscribers.retain(|tx| tx.send(()).is_ok());
     }
 }
 
@@ -234,9 +265,9 @@ pub(crate) fn resolve_data_dir() -> std::io::Result<PathBuf> {
     let dir = if let Some(raw) = std::env::var_os("PIKA_DESKTOP_DATA_DIR") {
         PathBuf::from(raw)
     } else if let Some(home) = std::env::var_os("HOME") {
-        PathBuf::from(home).join(".pika-desktop")
+        PathBuf::from(home).join(".pika")
     } else {
-        PathBuf::from(".pika-desktop")
+        PathBuf::from(".pika")
     };
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
@@ -260,6 +291,13 @@ fn read_model(lock: &RwLock<ManagerModel>) -> std::sync::RwLockReadGuard<'_, Man
 
 fn write_model(lock: &RwLock<ManagerModel>) -> std::sync::RwLockWriteGuard<'_, ManagerModel> {
     match lock.write() {
+        Ok(guard) => guard,
+        Err(poison) => poison.into_inner(),
+    }
+}
+
+fn lock_subscribers(lock: &Mutex<Vec<Sender<()>>>) -> std::sync::MutexGuard<'_, Vec<Sender<()>>> {
+    match lock.lock() {
         Ok(guard) => guard,
         Err(poison) => poison.into_inner(),
     }
