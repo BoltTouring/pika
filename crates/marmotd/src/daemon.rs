@@ -231,7 +231,10 @@ struct CallMediaCryptoContext {
 
 #[derive(Debug)]
 enum CallWorkerEvent {
-    TranscriptFinal { call_id: String, text: String },
+    TranscriptFinal {
+        call_id: String,
+        text: String,
+    },
     AudioPublished {
         call_id: String,
         request_id: Option<String>,
