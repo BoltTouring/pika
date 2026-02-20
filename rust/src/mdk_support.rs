@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 
 use anyhow::{anyhow, Context, Result};
 use mdk_core::{MdkConfig, MDK};
-use mdk_sqlite_storage::MdkSqliteStorage;
+use mdk_sqlite_storage::{error::Error as MdkStorageError, MdkSqliteStorage};
 use nostr_sdk::prelude::PublicKey;
 
 pub type PikaMdk = MDK<MdkSqliteStorage>;
@@ -124,12 +124,30 @@ fn mdk_config() -> MdkConfig {
     }
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn is_legacy_missing_file_key_error(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<MdkStorageError>()
+            .map(|storage_err| matches!(storage_err, MdkStorageError::WrongEncryptionKey))
+            .unwrap_or(false)
+    })
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn remove_mdk_db_artifacts(db_path: &Path) {
+    let _ = std::fs::remove_file(db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("sqlite3-shm"));
+    let _ = std::fs::remove_file(db_path.with_extension("sqlite3-wal"));
+}
+
 /// Desktop: file-based encryption key stored next to the DB file.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn open_mdk_desktop_file_key(data_dir: &str, pubkey: &PublicKey) -> Result<PikaMdk> {
     let pubkey_hex = pubkey.to_hex();
     let db_path = mdk_db_path(data_dir, &pubkey_hex);
     let key_path = db_path.with_extension("key");
+    let had_existing_db = db_path.exists();
 
     if let Some(parent) = key_path.parent() {
         std::fs::create_dir_all(parent)
@@ -189,16 +207,14 @@ fn open_mdk_desktop_file_key(data_dir: &str, pubkey: &PublicKey) -> Result<PikaM
         Ok(mdk) => Ok(mdk),
         Err(err) => {
             // Legacy desktop builds could leave an encrypted DB without a persisted file key.
-            // If we just created a new key and opening still fails, reset local DB artifacts.
-            if created_key && db_path.exists() {
+            // Only recover when an existing DB fails specifically with WrongEncryptionKey.
+            if created_key && had_existing_db && is_legacy_missing_file_key_error(&err) {
                 tracing::warn!(
                     error = %err,
                     path = %db_path.display(),
                     "desktop mdk key missing for existing db; recreating local encrypted db"
                 );
-                let _ = std::fs::remove_file(&db_path);
-                let _ = std::fs::remove_file(db_path.with_extension("sqlite3-shm"));
-                let _ = std::fs::remove_file(db_path.with_extension("sqlite3-wal"));
+                remove_mdk_db_artifacts(&db_path);
                 open()
             } else {
                 Err(err)
@@ -308,5 +324,35 @@ mod tests {
         // Subsequent open should succeed with the persisted key.
         let reopened = open_mdk_desktop_file_key(&data_dir, &pubkey).expect("reopen");
         drop(reopened);
+    }
+
+    #[test]
+    fn desktop_does_not_delete_db_on_non_legacy_open_failure() {
+        let tmp = tempdir().expect("tempdir");
+        let data_dir = tmp.path().to_string_lossy().to_string();
+        let pubkey = Keys::generate().public_key();
+        let pubkey_hex = pubkey.to_hex();
+        let db_path = mdk_db_path(&data_dir, &pubkey_hex);
+        let key_path = db_path.with_extension("key");
+
+        // Use a directory at the DB path to force an open failure that is not WrongEncryptionKey.
+        std::fs::create_dir_all(&db_path).expect("create directory at db path");
+        assert!(db_path.is_dir(), "fixture must stay a directory");
+
+        let err = match open_mdk_desktop_file_key(&data_dir, &pubkey) {
+            Ok(_) => panic!("open should fail"),
+            Err(err) => err,
+        };
+        assert!(
+            db_path.is_dir(),
+            "non-legacy failures must not delete db artifacts"
+        );
+        assert!(key_path.exists(), "key file should still be persisted");
+
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("open encrypted mdk sqlite db with file key"),
+            "error should surface context for troubleshooting"
+        );
     }
 }
