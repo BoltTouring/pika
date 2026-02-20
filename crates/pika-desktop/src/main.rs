@@ -6,7 +6,8 @@ use app_manager::AppManager;
 use iced::widget::{column, container, row, rule, text};
 use iced::{Element, Fill, Font, Size, Subscription, Task, Theme};
 use pika_core::{
-    project_desktop, AppAction, AppState, AuthState, DesktopDetailPane, DesktopShellMode, Screen,
+    project_desktop, AppAction, AppState, AuthState, CallStatus, DesktopDetailPane,
+    DesktopShellMode, Screen,
 };
 use std::time::Duration;
 
@@ -76,6 +77,8 @@ struct DesktopApp {
     // Group info
     group_info_name_draft: String,
     group_info_npub_input: String,
+    // Calling
+    show_call_screen: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -119,6 +122,15 @@ pub enum Message {
     RemoveGroupMember(String),
     LeaveGroup,
     GroupInfoNpubChanged(String),
+    // Calling
+    StartCall,
+    AcceptCall,
+    RejectCall,
+    EndCall,
+    ToggleMute,
+    OpenCallScreen,
+    DismissCallScreen,
+    CallTimerTick,
 }
 
 impl DesktopApp {
@@ -154,7 +166,19 @@ impl DesktopApp {
             let relative_time_ticks =
                 iced::time::every(Duration::from_secs(30)).map(|_| Message::RelativeTimeTick);
 
-            Subscription::batch([core_updates, relative_time_ticks])
+            let mut subs = vec![core_updates, relative_time_ticks];
+            if self.show_call_screen
+                && self
+                    .state
+                    .active_call
+                    .as_ref()
+                    .is_some_and(|c| matches!(c.status, CallStatus::Active))
+            {
+                subs.push(
+                    iced::time::every(Duration::from_secs(1)).map(|_| Message::CallTimerTick),
+                );
+            }
+            Subscription::batch(subs)
         } else {
             Subscription::none()
         }
@@ -258,6 +282,7 @@ impl DesktopApp {
                         manager.dispatch(AppAction::SendMessage {
                             chat_id: chat.chat_id.clone(),
                             content,
+                            kind: None,
                         });
                     }
                     self.message_input.clear();
@@ -417,6 +442,56 @@ impl DesktopApp {
                 }
                 self.clear_all_overlays();
             }
+
+            // ── Calling ──────────────────────────────────────────────
+            Message::StartCall => {
+                if let Some(chat) = &self.state.current_chat {
+                    if let Some(manager) = &self.manager {
+                        manager.dispatch(AppAction::StartCall {
+                            chat_id: chat.chat_id.clone(),
+                        });
+                    }
+                }
+                self.show_call_screen = true;
+            }
+            Message::AcceptCall => {
+                if let Some(call) = &self.state.active_call {
+                    if let Some(manager) = &self.manager {
+                        manager.dispatch(AppAction::AcceptCall {
+                            chat_id: call.chat_id.clone(),
+                        });
+                    }
+                }
+            }
+            Message::RejectCall => {
+                if let Some(call) = &self.state.active_call {
+                    if let Some(manager) = &self.manager {
+                        manager.dispatch(AppAction::RejectCall {
+                            chat_id: call.chat_id.clone(),
+                        });
+                    }
+                }
+                self.show_call_screen = false;
+            }
+            Message::EndCall => {
+                if let Some(manager) = &self.manager {
+                    manager.dispatch(AppAction::EndCall);
+                }
+            }
+            Message::ToggleMute => {
+                if let Some(manager) = &self.manager {
+                    manager.dispatch(AppAction::ToggleMute);
+                }
+            }
+            Message::OpenCallScreen => {
+                self.show_call_screen = true;
+            }
+            Message::DismissCallScreen => {
+                self.show_call_screen = false;
+            }
+            Message::CallTimerTick => {
+                // No-op: triggers a re-render so the duration display updates.
+            }
         }
 
         Task::none()
@@ -540,9 +615,24 @@ impl DesktopApp {
                 &self.new_chat_search,
                 cache,
             )
+        } else if self.show_call_screen && self.state.active_call.is_some() {
+            let call = self.state.active_call.as_ref().unwrap();
+            let peer_name = self
+                .state
+                .current_chat
+                .as_ref()
+                .and_then(|c| c.members.first())
+                .and_then(|m| m.name.as_deref())
+                .unwrap_or("Unknown");
+            views::call_screen::call_screen_view(call, peer_name)
         } else if route.selected_chat_id.is_some() {
             if let Some(chat) = &self.state.current_chat {
-                views::conversation::conversation_view(chat, &self.message_input, cache)
+                views::conversation::conversation_view(
+                    chat,
+                    &self.message_input,
+                    self.state.active_call.as_ref(),
+                    cache,
+                )
             } else {
                 views::empty_state::empty_state_view()
             }
@@ -590,6 +680,7 @@ impl DesktopApp {
             profile_toast: None,
             group_info_name_draft: String::new(),
             group_info_npub_input: String::new(),
+            show_call_screen: false,
         }
     }
 
@@ -641,6 +732,21 @@ impl DesktopApp {
                 {
                     self.optimistic_selected_chat_id = None;
                 }
+            }
+
+            // Auto-show call screen on incoming call; auto-dismiss when call ends.
+            let had_call = self.state.active_call.is_some();
+            let has_call = latest.active_call.is_some();
+            if !had_call && has_call {
+                if matches!(
+                    latest.active_call.as_ref().map(|c| &c.status),
+                    Some(CallStatus::Ringing)
+                ) {
+                    self.show_call_screen = true;
+                }
+            }
+            if had_call && !has_call {
+                self.show_call_screen = false;
             }
 
             self.state = latest;

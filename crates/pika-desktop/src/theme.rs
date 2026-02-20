@@ -196,6 +196,58 @@ pub fn badge_container_style(_theme: &Theme) -> container::Style {
     }
 }
 
+// ── Call screen ─────────────────────────────────────────────────────────────
+
+pub const CALL_BG: Color = Color::from_rgb(0.06, 0.06, 0.14); // dark blue-black
+pub const CALL_ACCEPT: Color = Color::from_rgb(0.20, 0.78, 0.35); // green
+pub const CALL_MUTED: Color = Color::from_rgb(0.95, 0.60, 0.07); // orange
+
+pub fn call_screen_bg_style(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(CALL_BG)),
+        ..Default::default()
+    }
+}
+
+pub fn call_accept_button_style(_theme: &Theme, status: button::Status) -> button::Style {
+    let bg = match status {
+        button::Status::Hovered => Color::from_rgb(0.24, 0.85, 0.40),
+        _ => CALL_ACCEPT,
+    };
+    button::Style {
+        background: Some(Background::Color(bg)),
+        text_color: Color::WHITE,
+        border: border::rounded(6),
+        ..Default::default()
+    }
+}
+
+pub fn call_muted_button_style(_theme: &Theme, status: button::Status) -> button::Style {
+    let bg = match status {
+        button::Status::Hovered => Color::from_rgb(0.98, 0.65, 0.10),
+        _ => CALL_MUTED,
+    };
+    button::Style {
+        background: Some(Background::Color(bg)),
+        text_color: Color::WHITE,
+        border: border::rounded(6),
+        ..Default::default()
+    }
+}
+
+pub fn call_control_button_style(_theme: &Theme, status: button::Status) -> button::Style {
+    let bg = match status {
+        button::Status::Hovered => Color::from_rgb(0.22, 0.22, 0.30),
+        _ => Color::from_rgb(0.16, 0.16, 0.24),
+    };
+    button::Style {
+        background: Some(Background::Color(bg)),
+        text_color: Color::WHITE,
+        border: border::rounded(6),
+        ..Default::default()
+    }
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 pub fn relative_time(unix_secs: i64) -> String {
