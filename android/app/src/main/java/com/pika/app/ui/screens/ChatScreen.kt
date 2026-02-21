@@ -17,6 +17,8 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
@@ -157,7 +159,11 @@ fun ChatScreen(manager: AppManager, chatId: String, padding: PaddingValues) {
         },
     ) { inner ->
         Column(
-            modifier = Modifier.fillMaxSize().padding(inner),
+            modifier =
+                Modifier
+                    .fillMaxSize()
+                    .padding(inner)
+                    .padding(top = 8.dp),
         ) {
             CallControls(
                 manager = manager,
@@ -183,7 +189,12 @@ fun ChatScreen(manager: AppManager, chatId: String, padding: PaddingValues) {
             }
 
             Row(
-                modifier = Modifier.fillMaxWidth().padding(10.dp),
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+                        .navigationBarsPadding()
+                        .imePadding()
+                        .padding(start = 12.dp, top = 8.dp, end = 12.dp, bottom = 16.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 OutlinedTextField(
