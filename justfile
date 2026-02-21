@@ -69,7 +69,7 @@ android-device-start *ARGS:
   just rmp devices start android {{ARGS}}
 
 # Boot Android target and open app with agent-device.
-android-agent-open APP="com.justinmoon.pika.dev" *ARGS:
+android-agent-open APP="com.justinmoon.pika.dev" *ARGS="":
   just android-device-start {{ARGS}}
   ./tools/agent-device --platform android open {{APP}}
 
@@ -211,6 +211,7 @@ pre-merge-pika: fmt
   just test --lib --tests
   cd android && ./gradlew :app:compileDebugAndroidTestKotlin
   cargo build -p pika-cli
+  just desktop-check
   actionlint
   npx --yes @justinmoon/agent-tools check-docs
   npx --yes @justinmoon/agent-tools check-justfile

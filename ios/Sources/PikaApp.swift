@@ -2,6 +2,15 @@ import SwiftUI
 import UserNotifications
 
 class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
+    /// The chat currently on screen. Set from ContentView so ``willPresent``
+    /// can suppress foreground notifications for the active conversation.
+    static var activeChatId: String?
+
+    /// Callback set by PikaApp to navigate to a chat when a notification is tapped.
+    static var onOpenChat: ((String) -> Void)?
+    /// Buffered chat ID for cold-launch (didReceive fires before the callback is set).
+    static var pendingOpenChatId: String?
+
     func application(
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
@@ -35,11 +44,32 @@ class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDele
     ) {
         // Only show notifications the NSE successfully decrypted (marked with chat_id).
         // Unprocessed notifications (e.g. self-messages while app is in foreground) are suppressed.
-        if notification.request.content.userInfo["chat_id"] != nil {
-            completionHandler([.banner, .sound, .badge])
-        } else {
+        guard let chatId = notification.request.content.userInfo["chat_id"] as? String else {
             completionHandler([])
+            return
         }
+        // Suppress notifications for the conversation currently on screen.
+        if chatId == Self.activeChatId {
+            completionHandler([])
+        } else {
+            completionHandler([.banner, .sound, .badge])
+        }
+    }
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        if let chatId = response.notification.request.content.userInfo["chat_id"] as? String {
+            if let handler = Self.onOpenChat {
+                handler(chatId)
+            } else {
+                // Cold launch: buffer until the UI is ready.
+                Self.pendingOpenChatId = chatId
+            }
+        }
+        completionHandler()
     }
 }
 
@@ -52,9 +82,22 @@ struct PikaApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView(manager: manager)
+                .onAppear {
+                    AppDelegate.onOpenChat = { chatId in
+                        manager.dispatch(.openChat(chatId: chatId))
+                    }
+                    // Cold launch from a notification tap — process the buffered chat ID.
+                    if let chatId = AppDelegate.pendingOpenChatId {
+                        AppDelegate.pendingOpenChatId = nil
+                        manager.dispatch(.openChat(chatId: chatId))
+                    }
+                }
                 .onChange(of: scenePhase) { _, phase in
                     if phase == .active {
                         manager.onForeground()
+                        if let chatId = AppDelegate.activeChatId {
+                            clearDeliveredNotifications(forChatId: chatId)
+                        }
                     }
                 }
                 .onOpenURL { url in
