@@ -102,10 +102,7 @@ impl AppCore {
                 .mdk
                 .get_messages(&g.mls_group_id, Some(Pagination::new(Some(20), Some(0))))
                 .ok()
-                .and_then(|v| {
-                    v.into_iter()
-                        .find(|m| !super::call_control::is_call_signal_payload(&m.content))
-                });
+                .and_then(|v| v.into_iter().find(|m| m.kind != CALL_SIGNAL_KIND));
 
             let stored_last_message = newest.as_ref().map(|m| m.content.clone());
             let stored_last_message_at = newest
@@ -289,7 +286,7 @@ impl AppCore {
         let storage_len = messages.len();
         let visible_messages: Vec<_> = messages
             .into_iter()
-            .filter(|m| !super::call_control::is_call_signal_payload(&m.content))
+            .filter(|m| m.kind != super::CALL_SIGNAL_KIND)
             .collect();
 
         // Separate reactions (kind 7) from regular messages.
@@ -506,7 +503,7 @@ impl AppCore {
 
         let mut older: Vec<ChatMessage> = page
             .into_iter()
-            .filter(|m| !super::call_control::is_call_signal_payload(&m.content))
+            .filter(|m| m.kind != super::CALL_SIGNAL_KIND)
             .rev()
             .map(|m| {
                 let id = m.id.to_hex();

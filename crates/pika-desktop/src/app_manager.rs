@@ -611,6 +611,7 @@ mod tests {
         manager.dispatch(AppAction::SendMessage {
             chat_id: chat_id.clone(),
             content: probe.clone(),
+            kind: None,
         });
 
         wait_for_with_timeout(

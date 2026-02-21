@@ -1,6 +1,6 @@
-use iced::widget::{button, column, container, row, rule, scrollable, text, text_input};
+use iced::widget::{button, column, container, row, rule, scrollable, text, text_input, Space};
 use iced::{Alignment, Element, Fill, Theme};
-use pika_core::ChatViewState;
+use pika_core::{CallState, CallStatus, ChatViewState};
 
 use crate::theme;
 use crate::views::avatar::avatar_circle;
@@ -11,6 +11,7 @@ use crate::Message;
 pub fn conversation_view<'a>(
     chat: &'a ChatViewState,
     message_input: &str,
+    active_call: Option<&'a CallState>,
     avatar_cache: &mut super::avatar::AvatarCache,
 ) -> Element<'a, Message, Theme> {
     // ── Header bar ──────────────────────────────────────────────────
@@ -28,13 +29,53 @@ pub fn conversation_view<'a>(
 
     let picture_url = chat.members.first().and_then(|m| m.picture_url.as_deref());
 
-    let header_content = row![
+    // Call button for 1:1 chats
+    let call_button: Option<Element<'a, Message, Theme>> = if !chat.is_group {
+        let has_live_call_for_chat = active_call
+            .as_ref()
+            .map(|c| c.chat_id == chat.chat_id && !matches!(c.status, CallStatus::Ended { .. }))
+            .unwrap_or(false);
+        let has_live_call_elsewhere = active_call
+            .as_ref()
+            .map(|c| c.chat_id != chat.chat_id && !matches!(c.status, CallStatus::Ended { .. }))
+            .unwrap_or(false);
+
+        let label = if has_live_call_for_chat {
+            "\u{1F4DE}" // telephone receiver (filled feel)
+        } else {
+            "\u{260E}" // telephone (outline feel)
+        };
+
+        let btn = button(text(label).size(18).center())
+            .padding([4, 10])
+            .style(theme::secondary_button_style);
+
+        if has_live_call_elsewhere {
+            Some(btn.into())
+        } else if has_live_call_for_chat {
+            Some(btn.on_press(Message::OpenCallScreen).into())
+        } else {
+            Some(btn.on_press(Message::StartCall).into())
+        }
+    } else {
+        None
+    };
+
+    let mut header_row = row![
         avatar_circle(Some(&*title), picture_url, 36.0, avatar_cache),
         header_info,
     ]
     .spacing(10)
-    .align_y(Alignment::Center)
-    .padding([8, 16]);
+    .align_y(Alignment::Center);
+
+    if call_button.is_some() {
+        header_row = header_row.push(Space::new().width(Fill));
+    }
+    if let Some(btn) = call_button {
+        header_row = header_row.push(btn);
+    }
+
+    let header_content = header_row.padding([8, 16]);
 
     // Make group headers clickable to show group info
     let header: Element<'a, Message, Theme> = if chat.is_group {

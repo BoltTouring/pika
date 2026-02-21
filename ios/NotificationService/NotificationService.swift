@@ -13,7 +13,9 @@ class NotificationService: UNNotificationServiceExtension {
         withContentHandler contentHandler: @escaping (UNNotificationContent) -> Void
     ) {
         self.contentHandler = contentHandler
-        bestAttemptContent = request.content.mutableCopy() as? UNMutableNotificationContent
+        // Default to empty content so that if the NSE times out we suppress
+        // rather than showing the server's generic "New message" fallback.
+        bestAttemptContent = UNMutableNotificationContent()
 
         guard let content = bestAttemptContent,
               let eventJson = request.content.userInfo["nostr_event"] as? String else {
@@ -63,6 +65,35 @@ class NotificationService: UNNotificationServiceExtension {
                     senderName: msg.senderName,
                     senderPubkey: msg.senderPubkey,
                     chatId: msg.chatId,
+                    senderImage: nil
+                )
+                contentHandler(updated)
+            }
+        case .callInvite(let info):
+            content.title = info.callerName
+            content.body = "Incoming call"
+            content.sound = .defaultCritical
+            content.userInfo["chat_id"] = info.chatId
+            content.userInfo["call_id"] = info.callId
+            content.threadIdentifier = info.chatId
+
+            if let urlStr = info.callerPictureUrl, let url = URL(string: urlStr) {
+                Self.downloadAvatar(url: url) { image in
+                    let updated = Self.applyCommNotification(
+                        to: content,
+                        senderName: info.callerName,
+                        senderPubkey: info.chatId,
+                        chatId: info.chatId,
+                        senderImage: image
+                    )
+                    contentHandler(updated)
+                }
+            } else {
+                let updated = Self.applyCommNotification(
+                    to: content,
+                    senderName: info.callerName,
+                    senderPubkey: info.chatId,
+                    chatId: info.chatId,
                     senderImage: nil
                 )
                 contentHandler(updated)

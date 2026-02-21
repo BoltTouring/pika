@@ -37,6 +37,7 @@ pub enum AppAction {
     SendMessage {
         chat_id: String,
         content: String,
+        kind: Option<u16>,
     },
     RetryMessage {
         chat_id: String,
@@ -113,6 +114,7 @@ pub enum AppAction {
     SetPushToken {
         token: String,
     },
+    ReregisterPush,
 
     // Follow list
     RefreshFollowList,
@@ -179,6 +181,7 @@ impl AppAction {
 
             // Push notifications
             AppAction::SetPushToken { .. } => "SetPushToken",
+            AppAction::ReregisterPush => "ReregisterPush",
 
             // Follow list
             AppAction::RefreshFollowList => "RefreshFollowList",

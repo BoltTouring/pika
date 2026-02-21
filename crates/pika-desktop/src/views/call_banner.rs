@@ -1,0 +1,41 @@
+use iced::widget::{button, container, row, text};
+use iced::{Element, Fill, Theme};
+
+use crate::theme;
+use crate::Message;
+
+/// Full-width incoming-call banner shown at the top of the window.
+pub fn incoming_call_banner(peer_name: &str) -> Element<'_, Message, Theme> {
+    let label = format!("\u{260e} Incoming call from {peer_name}");
+
+    let row = row![
+        text(label).color(iced::Color::WHITE).width(Fill),
+        button(text("Decline").size(13).color(iced::Color::WHITE).center())
+            .on_press(Message::RejectCall)
+            .padding([6, 16])
+            .style(theme::danger_button_style),
+        button(text("Accept").size(13).center())
+            .on_press(Message::AcceptCall)
+            .padding([6, 16])
+            .style(|_theme: &Theme, status: button::Status| {
+                let bg = match status {
+                    button::Status::Hovered => iced::Color::from_rgb(0.9, 0.9, 0.9),
+                    _ => iced::Color::WHITE,
+                };
+                button::Style {
+                    background: Some(iced::Background::Color(bg)),
+                    text_color: iced::Color::from_rgb(0.1, 0.1, 0.1),
+                    border: iced::border::rounded(6),
+                    ..Default::default()
+                }
+            }),
+    ]
+    .spacing(8)
+    .align_y(iced::Alignment::Center);
+
+    container(row)
+        .padding([8, 16])
+        .width(Fill)
+        .style(theme::incoming_call_banner_style)
+        .into()
+}

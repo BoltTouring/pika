@@ -207,6 +207,7 @@
             xcodeWrapper
           ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
             pkgs.xvfb-run
+            pkgs.alsa-lib
           ] ++ linuxGuiRuntimeLibraries;
 
           shellHook = ''

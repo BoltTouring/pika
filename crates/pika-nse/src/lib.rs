@@ -20,8 +20,22 @@ pub struct PushNotificationContent {
 pub enum PushNotificationResult {
     /// Decrypted successfully — show the notification.
     Content { content: PushNotificationContent },
+    /// Incoming call invite — show call notification.
+    CallInvite {
+        chat_id: String,
+        call_id: String,
+        caller_name: String,
+        caller_picture_url: Option<String>,
+    },
     /// Recognised but should not alert (self-message, call signal, etc.).
     Suppress,
+}
+
+#[derive(serde::Deserialize)]
+struct CallProbe {
+    #[serde(rename = "type")]
+    msg_type: String,
+    call_id: String,
 }
 
 #[uniffi::export]
@@ -47,55 +61,69 @@ pub fn decrypt_push_notification(
         _ => return None,
     };
 
-    // only give push notifications for chat messages
-    if msg.kind != Kind::Custom(9) {
-        return Some(PushNotificationResult::Suppress);
-    }
-
     // Don't notify for self-messages.
     if msg.pubkey == pubkey {
-        return Some(PushNotificationResult::Suppress);
-    }
-
-    // Don't notify for call signals.
-    if is_call_signal_payload(&msg.content) {
         return Some(PushNotificationResult::Suppress);
     }
 
     let group = mdk.get_group(&msg.mls_group_id).ok()??;
     let chat_id = hex::encode(group.nostr_group_id);
 
-    let all_groups = mdk.get_groups().ok()?;
-    let group_info = all_groups
-        .iter()
-        .find(|g| g.mls_group_id == msg.mls_group_id);
+    match msg.kind {
+        Kind::ChatMessage => {
+            // For chat messages, if decryption failed, suppress the notification.
+            if msg.content.is_empty() {
+                return Some(PushNotificationResult::Suppress);
+            }
 
-    let group_name = group_info.and_then(|g| {
-        if g.name != "DM" && !g.name.is_empty() {
-            Some(g.name.clone())
-        } else {
-            None
+            let all_groups = mdk.get_groups().ok()?;
+            let group_info = all_groups
+                .iter()
+                .find(|g| g.mls_group_id == msg.mls_group_id);
+
+            let group_name = group_info.and_then(|g| {
+                if g.name != "DM" && !g.name.is_empty() {
+                    Some(g.name.clone())
+                } else {
+                    None
+                }
+            });
+
+            let members = mdk.get_members(&msg.mls_group_id).unwrap_or_default();
+            let other_count = members.iter().filter(|p| *p != &pubkey).count();
+            let is_group = other_count > 1 || (group_name.is_some() && other_count > 0);
+
+            let sender_hex = msg.pubkey.to_hex();
+            let (sender_name, sender_picture_url) = resolve_sender_profile(&data_dir, &sender_hex);
+
+            Some(PushNotificationResult::Content {
+                content: PushNotificationContent {
+                    chat_id,
+                    sender_pubkey: sender_hex,
+                    sender_name,
+                    sender_picture_url,
+                    content: msg.content,
+                    is_group,
+                    group_name,
+                },
+            })
         }
-    });
-
-    let members = mdk.get_members(&msg.mls_group_id).unwrap_or_default();
-    let other_count = members.iter().filter(|p| *p != &pubkey).count();
-    let is_group = other_count > 1 || (group_name.is_some() && other_count > 0);
-
-    let sender_hex = msg.pubkey.to_hex();
-    let (sender_name, sender_picture_url) = resolve_sender_profile(&data_dir, &sender_hex);
-
-    Some(PushNotificationResult::Content {
-        content: PushNotificationContent {
-            chat_id,
-            sender_pubkey: sender_hex,
-            sender_name,
-            sender_picture_url,
-            content: msg.content,
-            is_group,
-            group_name,
-        },
-    })
+        Kind::Custom(10) => {
+            let probe: CallProbe = serde_json::from_str(&msg.content).ok()?;
+            if probe.msg_type != "call.invite" {
+                return Some(PushNotificationResult::Suppress);
+            }
+            let sender_hex = msg.pubkey.to_hex();
+            let (caller_name, caller_picture_url) = resolve_sender_profile(&data_dir, &sender_hex);
+            Some(PushNotificationResult::CallInvite {
+                chat_id,
+                call_id: probe.call_id,
+                caller_name,
+                caller_picture_url,
+            })
+        }
+        _ => Some(PushNotificationResult::Suppress),
+    }
 }
 
 /// Look up display name and picture URL from the SQLite profile cache.
@@ -142,17 +170,4 @@ fn resolve_sender_profile(data_dir: &str, pubkey_hex: &str) -> (String, Option<S
     });
 
     (name, picture_url)
-}
-
-/// Minimal check for call signal payloads without pulling in heavy call_control deps.
-/// Matches `{"v":1,"ns":"pika.call",...}`.
-fn is_call_signal_payload(content: &str) -> bool {
-    #[derive(serde::Deserialize)]
-    struct Probe {
-        v: u8,
-        ns: String,
-    }
-    serde_json::from_str::<Probe>(content)
-        .map(|p| p.v == 1 && p.ns == "pika.call")
-        .unwrap_or(false)
 }
