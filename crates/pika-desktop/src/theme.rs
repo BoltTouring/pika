@@ -198,6 +198,16 @@ pub fn badge_container_style(_theme: &Theme) -> container::Style {
 
 // ── Call screen ─────────────────────────────────────────────────────────────
 
+pub const CALL_BANNER_BG: Color = Color::from_rgb(0.20, 0.78, 0.35); // green (matches CALL_ACCEPT)
+
+pub fn incoming_call_banner_style(_theme: &Theme) -> container::Style {
+    container::Style {
+        text_color: Some(Color::WHITE),
+        background: Some(Background::Color(CALL_BANNER_BG)),
+        ..Default::default()
+    }
+}
+
 pub const CALL_BG: Color = Color::from_rgb(0.06, 0.06, 0.14); // dark blue-black
 pub const CALL_ACCEPT: Color = Color::from_rgb(0.20, 0.78, 0.35); // green
 pub const CALL_MUTED: Color = Color::from_rgb(0.95, 0.60, 0.07); // orange

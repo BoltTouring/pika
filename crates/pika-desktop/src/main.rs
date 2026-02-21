@@ -462,6 +462,7 @@ impl DesktopApp {
                         });
                     }
                 }
+                self.show_call_screen = true;
             }
             Message::RejectCall => {
                 if let Some(call) = &self.state.active_call {
@@ -544,6 +545,21 @@ impl DesktopApp {
         {
             let show_relay_reset = self.profile_toast.is_none() && self.should_offer_relay_reset();
             main_column = main_column.push(views::toast::toast_bar(toast_msg, show_relay_reset));
+        }
+
+        // Incoming call banner (visible regardless of which pane/overlay is active)
+        if let Some(call) = &self.state.active_call {
+            if matches!(call.status, CallStatus::Ringing) {
+                let peer_name = self
+                    .state
+                    .chat_list
+                    .iter()
+                    .find(|c| c.chat_id == call.chat_id)
+                    .and_then(|c| c.members.first())
+                    .and_then(|m| m.name.as_deref())
+                    .unwrap_or("Unknown");
+                main_column = main_column.push(views::call_banner::incoming_call_banner(peer_name));
+            }
         }
 
         let cache = &mut *self.avatar_cache.borrow_mut();
@@ -734,17 +750,9 @@ impl DesktopApp {
                 }
             }
 
-            // Auto-show call screen on incoming call; auto-dismiss when call ends.
+            // Auto-dismiss call screen when call ends.
             let had_call = self.state.active_call.is_some();
             let has_call = latest.active_call.is_some();
-            if !had_call && has_call {
-                if matches!(
-                    latest.active_call.as_ref().map(|c| &c.status),
-                    Some(CallStatus::Ringing)
-                ) {
-                    self.show_call_screen = true;
-                }
-            }
             if had_call && !has_call {
                 self.show_call_screen = false;
             }

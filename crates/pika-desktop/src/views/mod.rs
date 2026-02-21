@@ -1,4 +1,5 @@
 pub mod avatar;
+pub mod call_banner;
 pub mod call_screen;
 pub mod chat_rail;
 pub mod conversation;

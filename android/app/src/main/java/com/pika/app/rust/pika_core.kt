@@ -1026,6 +1026,29 @@ private class JavaLangRefCleanable(
 /**
  * @suppress
  */
+public object FfiConverterUShort: FfiConverter<UShort, Short> {
+    override fun lift(value: Short): UShort {
+        return value.toUShort()
+    }
+
+    override fun read(buf: ByteBuffer): UShort {
+        return lift(buf.getShort())
+    }
+
+    override fun lower(value: UShort): Short {
+        return value.toShort()
+    }
+
+    override fun allocationSize(value: UShort) = 2UL
+
+    override fun write(value: UShort, buf: ByteBuffer) {
+        buf.putShort(value.toShort())
+    }
+}
+
+/**
+ * @suppress
+ */
 public object FfiConverterUInt: FfiConverter<UInt, Int> {
     override fun lift(value: Int): UInt {
         return value.toUInt()
@@ -2479,7 +2502,8 @@ sealed class AppAction {
     
     data class SendMessage(
         val `chatId`: kotlin.String, 
-        val `content`: kotlin.String) : AppAction()
+        val `content`: kotlin.String, 
+        val `kind`: kotlin.UShort?) : AppAction()
         
     {
         
@@ -2658,6 +2682,9 @@ sealed class AppAction {
         companion object
     }
     
+    object ReregisterPush : AppAction()
+    
+    
     object RefreshFollowList : AppAction()
     
     
@@ -2725,6 +2752,7 @@ public object FfiConverterTypeAppAction : FfiConverterRustBuffer<AppAction>{
             12 -> AppAction.SendMessage(
                 FfiConverterString.read(buf),
                 FfiConverterString.read(buf),
+                FfiConverterOptionalUShort.read(buf),
                 )
             13 -> AppAction.RetryMessage(
                 FfiConverterString.read(buf),
@@ -2789,11 +2817,12 @@ public object FfiConverterTypeAppAction : FfiConverterRustBuffer<AppAction>{
             34 -> AppAction.SetPushToken(
                 FfiConverterString.read(buf),
                 )
-            35 -> AppAction.RefreshFollowList
-            36 -> AppAction.FollowUser(
+            35 -> AppAction.ReregisterPush
+            36 -> AppAction.RefreshFollowList
+            37 -> AppAction.FollowUser(
                 FfiConverterString.read(buf),
                 )
-            37 -> AppAction.UnfollowUser(
+            38 -> AppAction.UnfollowUser(
                 FfiConverterString.read(buf),
                 )
             else -> throw RuntimeException("invalid enum value, something is very wrong!!")
@@ -2882,6 +2911,7 @@ public object FfiConverterTypeAppAction : FfiConverterRustBuffer<AppAction>{
                 4UL
                 + FfiConverterString.allocationSize(value.`chatId`)
                 + FfiConverterString.allocationSize(value.`content`)
+                + FfiConverterOptionalUShort.allocationSize(value.`kind`)
             )
         }
         is AppAction.RetryMessage -> {
@@ -3041,6 +3071,12 @@ public object FfiConverterTypeAppAction : FfiConverterRustBuffer<AppAction>{
                 + FfiConverterString.allocationSize(value.`token`)
             )
         }
+        is AppAction.ReregisterPush -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
         is AppAction.RefreshFollowList -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
@@ -3122,6 +3158,7 @@ public object FfiConverterTypeAppAction : FfiConverterRustBuffer<AppAction>{
                 buf.putInt(12)
                 FfiConverterString.write(value.`chatId`, buf)
                 FfiConverterString.write(value.`content`, buf)
+                FfiConverterOptionalUShort.write(value.`kind`, buf)
                 Unit
             }
             is AppAction.RetryMessage -> {
@@ -3237,17 +3274,21 @@ public object FfiConverterTypeAppAction : FfiConverterRustBuffer<AppAction>{
                 FfiConverterString.write(value.`token`, buf)
                 Unit
             }
-            is AppAction.RefreshFollowList -> {
+            is AppAction.ReregisterPush -> {
                 buf.putInt(35)
                 Unit
             }
-            is AppAction.FollowUser -> {
+            is AppAction.RefreshFollowList -> {
                 buf.putInt(36)
+                Unit
+            }
+            is AppAction.FollowUser -> {
+                buf.putInt(37)
                 FfiConverterString.write(value.`pubkey`, buf)
                 Unit
             }
             is AppAction.UnfollowUser -> {
-                buf.putInt(37)
+                buf.putInt(38)
                 FfiConverterString.write(value.`pubkey`, buf)
                 Unit
             }
@@ -3834,6 +3875,38 @@ internal object uniffiCallbackInterfaceAppReconciler {
  * @suppress
  */
 public object FfiConverterTypeAppReconciler: FfiConverterCallbackInterface<AppReconciler>()
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalUShort: FfiConverterRustBuffer<kotlin.UShort?> {
+    override fun read(buf: ByteBuffer): kotlin.UShort? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterUShort.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.UShort?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterUShort.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.UShort?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterUShort.write(value, buf)
+        }
+    }
+}
 
 
 
