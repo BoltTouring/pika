@@ -851,7 +851,7 @@ private struct ReactionChips: View {
                         if reaction.count > 1 {
                             Text("\(reaction.count)")
                                 .font(.system(size: 10, weight: .medium))
-                                .foregroundStyle(.white)
+                                .foregroundStyle(reaction.reactedByMe ? .white : .primary)
                         }
                     }
                     .padding(.horizontal, 6)
@@ -859,7 +859,7 @@ private struct ReactionChips: View {
                     .background(
                         reaction.reactedByMe
                             ? Color.blue.opacity(0.85)
-                            : Color(white: 0.22)
+                            : Color(uiColor: .systemGray5)
                     )
                     .clipShape(Capsule())
                     .overlay(
