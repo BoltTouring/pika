@@ -3,6 +3,7 @@ package com.pika.app.ui.screens
 import android.widget.Toast
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -40,15 +41,14 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.pika.app.AppManager
@@ -63,6 +63,7 @@ import com.pika.app.rust.Screen
 import com.pika.app.ui.theme.PikaBlue
 import com.pika.app.ui.TestTags
 import dev.jeziellago.compose.markdowntext.MarkdownText
+import kotlinx.coroutines.launch
 import org.json.JSONObject
 
 @Composable
@@ -82,7 +83,9 @@ fun ChatScreen(
     }
 
     var draft by remember { mutableStateOf("") }
+    var replyDraft by remember(chat.chatId) { mutableStateOf<ChatMessage?>(null) }
     val listState = rememberLazyListState()
+    val coroutineScope = rememberCoroutineScope()
     val newestMessageId = chat.messages.lastOrNull()?.id
     var shouldStickToBottom by remember(chat.chatId) { mutableStateOf(true) }
     var programmaticScrollInFlight by remember { mutableStateOf(false) }
@@ -95,6 +98,7 @@ fun ChatScreen(
         if (chat.messages.isNotEmpty()) {
             listState.scrollToItem(0)
         }
+        replyDraft = null
     }
 
     LaunchedEffect(isAtBottom, listState.isScrollInProgress, programmaticScrollInFlight) {
@@ -190,10 +194,10 @@ fun ChatScreen(
                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                val reversed = chat.messages.asReversed()
                 items(reversed, key = { it.id }) { msg ->
                     MessageBubble(
                         message = msg,
+                        messagesById = messagesById,
                         onSendMessage = { text ->
                             manager.dispatch(AppAction.SendMessage(chat.chatId, text, null))
                         },
@@ -201,14 +205,14 @@ fun ChatScreen(
                 }
             }
 
-            Row(
+            Column(
                 modifier =
                     Modifier
                         .fillMaxWidth()
                         .navigationBarsPadding()
                         .imePadding()
                         .padding(start = 12.dp, top = 8.dp, end = 12.dp, bottom = 16.dp),
-                verticalAlignment = Alignment.CenterVertically,
+                verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 OutlinedTextField(
                     value = draft,
@@ -227,7 +231,26 @@ fun ChatScreen(
                     },
                     modifier = Modifier.testTag(TestTags.CHAT_SEND),
                 ) {
-                    Text("Send")
+                    OutlinedTextField(
+                        value = draft,
+                        onValueChange = { draft = it },
+                        modifier = Modifier.weight(1f).testTag(TestTags.CHAT_MESSAGE_INPUT),
+                        placeholder = { Text("Message") },
+                        singleLine = false,
+                        maxLines = 4,
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Button(
+                        onClick = {
+                            val text = draft
+                            draft = ""
+                            manager.dispatch(AppAction.SendMessage(chat.chatId, text, replyDraft?.id))
+                            replyDraft = null
+                        },
+                        modifier = Modifier.testTag(TestTags.CHAT_SEND),
+                    ) {
+                        Text("Send")
+                    }
                 }
             }
         }
@@ -302,16 +325,34 @@ private fun parseMessageSegments(content: String): List<MessageSegment> {
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun MessageBubble(message: ChatMessage, onSendMessage: (String) -> Unit) {
+private fun MessageBubble(
+    message: ChatMessage,
+    messagesById: Map<String, ChatMessage>,
+    onSendMessage: (String) -> Unit,
+    onReplyTo: (ChatMessage) -> Unit,
+    onJumpToMessage: (String) -> Unit,
+) {
     val isMine = message.isMine
     val bubbleColor = if (isMine) PikaBlue else MaterialTheme.colorScheme.surfaceVariant
     val textColor = if (isMine) Color.White else MaterialTheme.colorScheme.onSurfaceVariant
     val align = if (isMine) Alignment.End else Alignment.Start
     val segments = remember(message.displayContent) { parseMessageSegments(message.displayContent) }
-    val clipboard = LocalClipboardManager.current
     val ctx = LocalContext.current
+    val replyTarget = remember(message.replyToMessageId, messagesById) {
+        message.replyToMessageId?.let { messagesById[it] }
+    }
 
     Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = align) {
+        message.replyToMessageId?.let { replyToMessageId ->
+            ReplyReferencePreview(
+                replyToMessageId = replyToMessageId,
+                target = replyTarget,
+                isMine = isMine,
+                onJumpToMessage = onJumpToMessage,
+            )
+            Spacer(Modifier.height(4.dp))
+        }
+
         for (segment in segments) {
             when (segment) {
                 is MessageSegment.Markdown -> {
@@ -324,8 +365,8 @@ private fun MessageBubble(message: ChatMessage, onSendMessage: (String) -> Unit)
                                     .combinedClickable(
                                         onClick = {},
                                         onLongClick = {
-                                            clipboard.setText(AnnotatedString(message.content))
-                                            Toast.makeText(ctx, "Copied", Toast.LENGTH_SHORT).show()
+                                            onReplyTo(message)
+                                            Toast.makeText(ctx, "Replying", Toast.LENGTH_SHORT).show()
                                         },
                                     )
                                     .padding(horizontal = 12.dp, vertical = 9.dp)
@@ -385,6 +426,120 @@ private fun MessageBubble(message: ChatMessage, onSendMessage: (String) -> Unit)
             }
         }
         Spacer(Modifier.height(2.dp))
+    }
+}
+
+@Composable
+private fun ReplyReferencePreview(
+    replyToMessageId: String,
+    target: ChatMessage?,
+    isMine: Boolean,
+    onJumpToMessage: (String) -> Unit,
+) {
+    val sender = remember(target) {
+        when {
+            target == null -> "Original message"
+            target.isMine -> "You"
+            !target.senderName.isNullOrBlank() -> target.senderName!!
+            else -> target.senderPubkey.take(8)
+        }
+    }
+    val snippet = remember(target) {
+        val text = target?.displayContent?.trim().orEmpty()
+        when {
+            target == null -> "Original message not loaded"
+            text.isEmpty() -> "(empty message)"
+            else -> text.lineSequence().first().let { first ->
+                if (first.length > 80) first.take(80) + "…" else first
+            }
+        }
+    }
+
+    val modifier =
+        Modifier
+            .clip(RoundedCornerShape(10.dp))
+            .background(if (isMine) Color.White.copy(alpha = 0.14f) else Color.Black.copy(alpha = 0.08f))
+            .padding(horizontal = 10.dp, vertical = 6.dp)
+            .widthIn(max = 280.dp)
+
+    Row(
+        modifier =
+            if (target != null) {
+                modifier.clickable { onJumpToMessage(replyToMessageId) }
+            } else {
+                modifier
+            },
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            modifier = Modifier.width(2.dp).height(28.dp).background(if (isMine) Color.White.copy(alpha = 0.8f) else PikaBlue),
+        )
+        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(
+                text = sender,
+                style = MaterialTheme.typography.labelSmall,
+                color = if (isMine) Color.White.copy(alpha = 0.86f) else MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+            )
+            Text(
+                text = snippet,
+                style = MaterialTheme.typography.bodySmall,
+                color = if (isMine) Color.White.copy(alpha = 0.8f) else MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+@Composable
+private fun ReplyComposerPreview(
+    message: ChatMessage,
+    onClear: () -> Unit,
+) {
+    val sender =
+        when {
+            message.isMine -> "You"
+            !message.senderName.isNullOrBlank() -> message.senderName!!
+            else -> message.senderPubkey.take(8)
+        }
+    val snippet =
+        message.displayContent.trim().lineSequence().firstOrNull()?.let {
+            if (it.length > 80) it.take(80) + "…" else it
+        } ?: "(empty message)"
+
+    Row(
+        modifier =
+            Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(10.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f))
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Box(
+            modifier = Modifier.width(2.dp).height(28.dp).background(PikaBlue),
+        )
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(
+                text = "Replying to $sender",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+            )
+            Text(
+                text = snippet,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        TextButton(onClick = onClear) {
+            Text("Cancel")
+        }
     }
 }
 

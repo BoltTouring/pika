@@ -14,7 +14,7 @@ struct ChatView: View {
     let state: ChatScreenState
     let activeCall: CallState?
     let callEvents: [CallTimelineEvent]
-    let onSendMessage: @MainActor (String) -> Void
+    let onSendMessage: @MainActor (String, String?) -> Void
     let onStartCall: @MainActor () -> Void
     let onOpenCallScreen: @MainActor () -> Void
     let onGroupInfo: (@MainActor () -> Void)?
@@ -32,6 +32,7 @@ struct ChatView: View {
     @State private var showMentionPicker = false
     @State private var mentionQuery = ""
     @State private var insertedMentions: [(display: String, npub: String)] = []
+    @State private var replyDraftMessage: ChatMessage?
     @FocusState private var isInputFocused: Bool
 
     private let scrollButtonBottomPadding: CGFloat = 12
@@ -43,7 +44,7 @@ struct ChatView: View {
         state: ChatScreenState,
         activeCall: CallState?,
         callEvents: [CallTimelineEvent],
-        onSendMessage: @escaping @MainActor (String) -> Void,
+        onSendMessage: @escaping @MainActor (String, String?) -> Void,
         onStartCall: @escaping @MainActor () -> Void,
         onOpenCallScreen: @escaping @MainActor () -> Void,
         onGroupInfo: (@MainActor () -> Void)? = nil,
@@ -190,6 +191,15 @@ struct ChatView: View {
                                             activeReactionMessageId = nil
                                             showContextActionCard = false
                                         }
+                                    },
+                                    onReply: {
+                                        replyDraftMessage = message
+                                        isInputFocused = true
+                                        withAnimation(.easeOut(duration: 0.15)) {
+                                            contextMenuMessage = nil
+                                            activeReactionMessageId = nil
+                                            showContextActionCard = false
+                                        }
                                     }
                                 )
                             }
@@ -220,6 +230,7 @@ struct ChatView: View {
 
     @ViewBuilder
     private func messageList(_ chat: ChatViewState) -> some View {
+        let messagesById = Dictionary(uniqueKeysWithValues: chat.messages.map { ($0.id, $0) })
         GeometryReader { scrollGeo in
             ScrollViewReader { proxy in
                 ScrollView {
@@ -232,7 +243,13 @@ struct ChatView: View {
                                         group: group,
                                         showSender: chat.isGroup,
                                         onSendMessage: onSendMessage,
+                                        replyTargetsById: messagesById,
                                         onTapSender: onTapSender,
+                                        onJumpToMessage: { messageId in
+                                            withAnimation(.easeOut(duration: 0.2)) {
+                                                proxy.scrollTo(messageId, anchor: .center)
+                                            }
+                                        },
                                         onReact: onReact,
                                         activeReactionMessageId: $activeReactionMessageId,
                                         onLongPressMessage: { message in
@@ -475,9 +492,10 @@ struct ChatView: View {
         for mention in insertedMentions {
             wire = wire.replacingOccurrences(of: mention.display, with: "nostr:\(mention.npub)")
         }
-        onSendMessage(wire)
+        onSendMessage(wire, replyDraftMessage?.id)
         messageText = ""
         insertedMentions = []
+        replyDraftMessage = nil
     }
 
     private func callFor(_ chat: ChatViewState) -> CallState? {
@@ -488,6 +506,32 @@ struct ChatView: View {
     private func hasLiveCallElsewhere(chat: ChatViewState) -> Bool {
         guard let activeCall else { return false }
         return activeCall.chatId != chat.chatId && activeCall.isLive
+    }
+
+    private func replySenderLabel(_ message: ChatMessage) -> String {
+        if message.isMine {
+            return "You"
+        }
+        if let name = message.senderName, !name.isEmpty {
+            return name
+        }
+        return String(message.senderPubkey.prefix(8))
+    }
+
+    private func replySnippet(_ message: ChatMessage) -> String {
+        let trimmed = message.displayContent.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "(empty message)" }
+        if let first = trimmed.split(separator: "\n").first {
+            let text = String(first)
+            if text.count > 80 {
+                return String(text.prefix(80)) + "…"
+            }
+            return text
+        }
+        if trimmed.count > 80 {
+            return String(trimmed.prefix(80)) + "…"
+        }
+        return trimmed
     }
 
     @ViewBuilder
@@ -505,6 +549,38 @@ struct ChatView: View {
                     mentionQuery = ""
                     showMentionPicker = false
                 }
+            }
+
+            if let replying = replyDraftMessage {
+                HStack(spacing: 10) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Replying to \(replySenderLabel(replying))")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        Text(replySnippet(replying))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    Spacer()
+                    Button {
+                        replyDraftMessage = nil
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.body)
+                            .foregroundStyle(.tertiary)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(.ultraThinMaterial)
+                .overlay(alignment: .leading) {
+                    Rectangle()
+                        .fill(Color.blue)
+                        .frame(width: 3)
+                }
+                .padding(.horizontal, 12)
             }
 
             HStack(spacing: 10) {
@@ -678,9 +754,19 @@ private struct QuickReactionBar: View {
 
 private struct MessageActionCard: View {
     let onCopy: () -> Void
+    let onReply: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
+            Button {
+                onReply()
+            } label: {
+                Label("Reply", systemImage: "arrowshape.turn.up.left")
+                    .font(.body.weight(.medium))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+
             Button {
                 onCopy()
             } label: {
@@ -690,9 +776,6 @@ private struct MessageActionCard: View {
             }
             .buttonStyle(.plain)
             .accessibilityIdentifier(TestIds.chatActionCopy)
-
-            // TODO: Add Reply / Forward / Info actions here once corresponding
-            // Rust core actions and app wiring exist.
         }
         .padding(14)
         .frame(width: 220, alignment: .leading)
@@ -963,8 +1046,10 @@ private enum GroupedBubblePosition {
 private struct MessageGroupRow: View {
     let group: GroupedChatMessage
     var showSender: Bool = false
-    let onSendMessage: @MainActor (String) -> Void
+    let onSendMessage: @MainActor (String, String?) -> Void
+    let replyTargetsById: [String: ChatMessage]
     var onTapSender: (@MainActor (String) -> Void)?
+    var onJumpToMessage: ((String) -> Void)? = nil
     var onReact: ((String, String) -> Void)?
     @Binding var activeReactionMessageId: String?
     var onLongPressMessage: ((ChatMessage) -> Void)? = nil
@@ -1005,7 +1090,9 @@ private struct MessageGroupRow: View {
                 MessageBubbleStack(
                     group: group,
                     onSendMessage: onSendMessage,
+                    replyTargetsById: replyTargetsById,
                     onReact: onReact,
+                    onJumpToMessage: onJumpToMessage,
                     activeReactionMessageId: $activeReactionMessageId,
                     onLongPressMessage: onLongPressMessage
                 )
@@ -1024,7 +1111,9 @@ private struct MessageGroupRow: View {
                 MessageBubbleStack(
                     group: group,
                     onSendMessage: onSendMessage,
+                    replyTargetsById: replyTargetsById,
                     onReact: onReact,
+                    onJumpToMessage: onJumpToMessage,
                     activeReactionMessageId: $activeReactionMessageId,
                     onLongPressMessage: onLongPressMessage
                 )
@@ -1049,8 +1138,10 @@ private struct MessageGroupRow: View {
 
 private struct MessageBubbleStack: View {
     let group: GroupedChatMessage
-    let onSendMessage: @MainActor (String) -> Void
+    let onSendMessage: @MainActor (String, String?) -> Void
+    let replyTargetsById: [String: ChatMessage]
     var onReact: ((String, String) -> Void)?
+    var onJumpToMessage: ((String) -> Void)? = nil
     @Binding var activeReactionMessageId: String?
     var onLongPressMessage: ((ChatMessage) -> Void)? = nil
 
@@ -1061,7 +1152,9 @@ private struct MessageBubbleStack: View {
                     message: message,
                     position: bubblePosition(at: index, count: group.messages.count),
                     onSendMessage: onSendMessage,
+                    replyTargetsById: replyTargetsById,
                     onReact: onReact,
+                    onJumpToMessage: onJumpToMessage,
                     activeReactionMessageId: $activeReactionMessageId,
                     onLongPressMessage: onLongPressMessage
                 )
@@ -1081,8 +1174,10 @@ private struct MessageBubbleStack: View {
 private struct MessageBubble: View {
     let message: ChatMessage
     let position: GroupedBubblePosition
-    let onSendMessage: @MainActor (String) -> Void
+    let onSendMessage: @MainActor (String, String?) -> Void
+    let replyTargetsById: [String: ChatMessage]
     var onReact: ((String, String) -> Void)?
+    var onJumpToMessage: ((String) -> Void)? = nil
     @Binding var activeReactionMessageId: String?
     var onLongPressMessage: ((ChatMessage) -> Void)? = nil
 
@@ -1096,14 +1191,28 @@ private struct MessageBubble: View {
         let segments = parseMessageSegments(message.displayContent, htmlState: message.htmlState)
 
         VStack(alignment: message.isMine ? .trailing : .leading, spacing: 0) {
+            if let replyToId = message.replyToMessageId {
+                ReplyPreviewCard(
+                    replyToMessageId: replyToId,
+                    target: replyTargetsById[replyToId],
+                    isMine: message.isMine,
+                    onTap: onJumpToMessage
+                )
+                .padding(.bottom, 3)
+            }
+
             ForEach(segments) { segment in
                 switch segment {
                 case .markdown(let text):
                     markdownBubble(text: text)
                 case .pikaPrompt(let prompt):
-                    PikaPromptView(prompt: prompt, message: message, onSelect: onSendMessage)
+                    PikaPromptView(prompt: prompt, message: message, onSelect: {
+                        onSendMessage($0, nil)
+                    })
                 case .pikaHtml(_, let html, let state):
-                    PikaHtmlView(html: html, htmlState: state, onSendMessage: onSendMessage)
+                    PikaHtmlView(html: html, htmlState: state, onSendMessage: {
+                        onSendMessage($0, nil)
+                    })
                 }
             }
             .overlay(alignment: message.isMine ? .bottomLeading : .bottomTrailing) {
@@ -1195,6 +1304,83 @@ private struct MessageBubble: View {
         let impactFeedback = UIImpactFeedbackGenerator(style: .medium)
         impactFeedback.impactOccurred()
         onLongPressMessage?(message)
+    }
+}
+
+private struct ReplyPreviewCard: View {
+    let replyToMessageId: String
+    let target: ChatMessage?
+    let isMine: Bool
+    var onTap: ((String) -> Void)? = nil
+
+    var body: some View {
+        Group {
+            if target != nil {
+                Button {
+                    onTap?(replyToMessageId)
+                } label: {
+                    content
+                }
+                .buttonStyle(.plain)
+            } else {
+                content
+            }
+        }
+    }
+
+    private var content: some View {
+        HStack(spacing: 8) {
+            Rectangle()
+                .fill(isMine ? Color.white.opacity(0.8) : Color.blue.opacity(0.9))
+                .frame(width: 2)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(senderLabel)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(isMine ? Color.white.opacity(0.86) : Color.secondary)
+                    .lineLimit(1)
+                Text(snippet)
+                    .font(.caption)
+                    .foregroundStyle(isMine ? Color.white.opacity(0.8) : Color.secondary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(
+            isMine ? Color.white.opacity(0.14) : Color.black.opacity(0.08),
+            in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+        )
+    }
+
+    private var senderLabel: String {
+        guard let target else { return "Original message" }
+        if target.isMine {
+            return "You"
+        }
+        if let name = target.senderName, !name.isEmpty {
+            return name
+        }
+        return String(target.senderPubkey.prefix(8))
+    }
+
+    private var snippet: String {
+        guard let target else { return "Original message not loaded" }
+        let trimmed = target.displayContent.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            return "(empty message)"
+        }
+        if let first = trimmed.split(separator: "\n").first {
+            let text = String(first)
+            if text.count > 80 {
+                return String(text.prefix(80)) + "…"
+            }
+            return text
+        }
+        if trimmed.count > 80 {
+            return String(trimmed.prefix(80)) + "…"
+        }
+        return trimmed
     }
 }
 
@@ -1563,6 +1749,7 @@ private enum ChatViewPreviewData {
                 senderName: "Anthony",
                 content: "First incoming bubble in a grouped run.",
                 displayContent: "First incoming bubble in a grouped run.",
+                replyToMessageId: nil,
                 mentions: [],
                 timestamp: 1_709_100_001,
                 isMine: false,
@@ -1578,6 +1765,7 @@ private enum ChatViewPreviewData {
                 senderName: "Anthony",
                 content: "Second message should visually join with the first.",
                 displayContent: "Second message should visually join with the first.",
+                replyToMessageId: nil,
                 mentions: [],
                 timestamp: 1_709_100_002,
                 isMine: false,
@@ -1603,6 +1791,7 @@ private enum ChatViewPreviewData {
                 senderName: nil,
                 content: "I can meet outside in five.",
                 displayContent: "I can meet outside in five.",
+                replyToMessageId: nil,
                 mentions: [],
                 timestamp: 1_709_100_010,
                 isMine: true,
@@ -1618,6 +1807,7 @@ private enum ChatViewPreviewData {
                 senderName: nil,
                 content: "If you're near ana's market, I'll find you.",
                 displayContent: "If you're near ana's market, I'll find you.",
+                replyToMessageId: nil,
                 mentions: [],
                 timestamp: 1_709_100_011,
                 isMine: true,
@@ -1638,7 +1828,7 @@ private enum ChatViewPreviewData {
             state: ChatScreenState(chat: PreviewAppState.chatDetail.currentChat),
             activeCall: nil,
             callEvents: [],
-            onSendMessage: { _ in },
+            onSendMessage: { _, _ in },
             onStartCall: {},
             onOpenCallScreen: {}
         )
@@ -1652,7 +1842,7 @@ private enum ChatViewPreviewData {
             state: ChatScreenState(chat: PreviewAppState.chatDetailFailed.currentChat),
             activeCall: nil,
             callEvents: [],
-            onSendMessage: { _ in },
+            onSendMessage: { _, _ in },
             onStartCall: {},
             onOpenCallScreen: {}
         )
@@ -1666,7 +1856,7 @@ private enum ChatViewPreviewData {
             state: ChatScreenState(chat: PreviewAppState.chatDetailEmpty.currentChat),
             activeCall: nil,
             callEvents: [],
-            onSendMessage: { _ in },
+            onSendMessage: { _, _ in },
             onStartCall: {},
             onOpenCallScreen: {}
         )
@@ -1680,7 +1870,7 @@ private enum ChatViewPreviewData {
             state: ChatScreenState(chat: PreviewAppState.chatDetailLongThread.currentChat),
             activeCall: nil,
             callEvents: [],
-            onSendMessage: { _ in },
+            onSendMessage: { _, _ in },
             onStartCall: {},
             onOpenCallScreen: {}
         )
@@ -1694,7 +1884,7 @@ private enum ChatViewPreviewData {
             state: ChatScreenState(chat: PreviewAppState.chatDetailGrouped.currentChat),
             activeCall: nil,
             callEvents: [],
-            onSendMessage: { _ in },
+            onSendMessage: { _, _ in },
             onStartCall: {},
             onOpenCallScreen: {}
         )
@@ -1702,12 +1892,12 @@ private enum ChatViewPreviewData {
 }
 
 #Preview("Message Group - Incoming") {
-    MessageGroupRow(group: ChatViewPreviewData.incomingGroup, showSender: true, onSendMessage: { _ in }, activeReactionMessageId: .constant(nil))
+    MessageGroupRow(group: ChatViewPreviewData.incomingGroup, showSender: true, onSendMessage: { _, _ in }, replyTargetsById: [:], activeReactionMessageId: .constant(nil))
         .padding(16)
 }
 
 #Preview("Message Group - Outgoing") {
-    MessageGroupRow(group: ChatViewPreviewData.outgoingGroup, showSender: true, onSendMessage: { _ in }, activeReactionMessageId: .constant(nil))
+    MessageGroupRow(group: ChatViewPreviewData.outgoingGroup, showSender: true, onSendMessage: { _, _ in }, replyTargetsById: [:], activeReactionMessageId: .constant(nil))
         .padding(16)
 }
 #endif

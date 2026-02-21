@@ -7,6 +7,27 @@ use crate::views::avatar::avatar_circle;
 use crate::views::message_bubble::message_bubble;
 use crate::Message;
 
+const CONVERSATION_SCROLL_ID: &str = "conversation-scroll";
+
+pub fn jump_to_message_task(chat: &ChatViewState, message_id: &str) -> Task<Message> {
+    if chat.messages.is_empty() {
+        return Task::none();
+    }
+    let Some(index) = chat.messages.iter().position(|m| m.id == message_id) else {
+        return Task::none();
+    };
+    let denom = chat.messages.len().saturating_sub(1) as f32;
+    let y = if denom <= 0.0 {
+        1.0
+    } else {
+        (index as f32 / denom).clamp(0.0, 1.0)
+    };
+    operation::snap_to(
+        CONVERSATION_SCROLL_ID,
+        operation::RelativeOffset { x: 0.0, y },
+    )
+}
+
 /// Center pane: conversation header + message list + input bar.
 pub fn conversation_view<'a>(
     chat: &'a ChatViewState,
@@ -109,6 +130,8 @@ pub fn conversation_view<'a>(
 
     // ── Messages ────────────────────────────────────────────────────
     let is_group = chat.is_group;
+    let messages_by_id: HashMap<&str, &ChatMessage> =
+        chat.messages.iter().map(|m| (m.id.as_str(), m)).collect();
     let messages = chat
         .messages
         .iter()
@@ -119,6 +142,7 @@ pub fn conversation_view<'a>(
         });
 
     let message_scroll = scrollable(messages)
+        .id(CONVERSATION_SCROLL_ID)
         .anchor_bottom()
         .height(Fill)
         .width(Fill);
@@ -137,22 +161,67 @@ pub fn conversation_view<'a>(
             .style(theme::secondary_button_style)
     };
 
-    let input_bar = container(
-        row![
-            text_input("Message\u{2026}", message_input)
-                .on_input(Message::MessageChanged)
-                .on_submit(Message::SendMessage)
-                .padding(10)
-                .width(Fill)
-                .style(theme::dark_input_style),
-            send_button,
+    let composer = row![
+        text_input("Message\u{2026}", message_input)
+            .on_input(Message::MessageChanged)
+            .on_submit(Message::SendMessage)
+            .padding(10)
+            .width(Fill)
+            .style(theme::dark_input_style),
+        send_button,
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center)
+    .padding([8, 16]);
+
+    let mut input_column = column![].spacing(6);
+    if let Some(replying) = replying_to {
+        let sender = if replying.is_mine {
+            "You".to_string()
+        } else {
+            replying
+                .sender_name
+                .clone()
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or_else(|| replying.sender_pubkey.chars().take(8).collect())
+        };
+        let snippet = replying
+            .display_content
+            .lines()
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let snippet = if snippet.is_empty() {
+            "(empty message)".to_string()
+        } else if snippet.chars().count() > 80 {
+            format!("{}…", snippet.chars().take(80).collect::<String>())
+        } else {
+            snippet
+        };
+        let reply_row = row![
+            column![
+                text(format!("Replying to {sender}"))
+                    .size(12)
+                    .color(theme::TEXT_SECONDARY),
+                text(snippet).size(12).color(theme::TEXT_FADED),
+            ]
+            .spacing(2)
+            .width(Fill),
+            button(text("Cancel").size(12))
+                .on_press(Message::CancelReplyTarget)
+                .style(theme::secondary_button_style),
         ]
         .spacing(8)
         .align_y(Alignment::Center)
-        .padding([8, 16]),
-    )
-    .width(Fill)
-    .style(theme::input_bar_style);
+        .padding([6, 16]);
+        input_column = input_column.push(reply_row);
+    }
+    input_column = input_column.push(composer);
+
+    let input_bar = container(input_column)
+        .width(Fill)
+        .style(theme::input_bar_style);
 
     // ── Typing indicator ─────────────────────────────────────────────
     let typing_indicator: Option<Element<'a, Message, Theme>> = if !chat.typing_members.is_empty() {

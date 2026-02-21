@@ -296,13 +296,7 @@ impl AppCore {
         for m in &visible_messages {
             if m.kind == nostr_sdk::Kind::Reaction {
                 // Find the target event id from the `e` tag.
-                if let Some(target_id) = m.tags.iter().find_map(|t| {
-                    if t.kind() == nostr_sdk::TagKind::e() {
-                        t.content().map(|s| s.to_string())
-                    } else {
-                        None
-                    }
-                }) {
+                if let Some(target_id) = first_event_tag_id(&m.tags) {
                     let emoji = if m.content.is_empty() || m.content == "+" {
                         "\u{2764}\u{FE0F}".to_string()
                     } else {
@@ -365,6 +359,7 @@ impl AppCore {
                     sender_name,
                     content: m.content.clone(),
                     display_content,
+                    reply_to_message_id: last_event_tag_id(&m.tags),
                     mentions,
                     timestamp: m.created_at.as_secs() as i64,
                     is_mine,
@@ -401,6 +396,7 @@ impl AppCore {
                     sender_name: None,
                     content: lm.content,
                     display_content,
+                    reply_to_message_id: lm.reply_to_message_id,
                     mentions,
                     timestamp: lm.timestamp,
                     is_mine: true,
@@ -523,6 +519,7 @@ impl AppCore {
                     sender_name,
                     content: m.content,
                     display_content,
+                    reply_to_message_id: last_event_tag_id(&m.tags),
                     mentions,
                     timestamp: m.created_at.as_secs() as i64,
                     is_mine,
@@ -549,6 +546,26 @@ impl AppCore {
             }
         }
     }
+}
+
+fn first_event_tag_id(tags: &Tags) -> Option<String> {
+    tags.iter().find_map(|tag| {
+        if tag.kind() == TagKind::e() {
+            tag.content().map(|s| s.to_string())
+        } else {
+            None
+        }
+    })
+}
+
+fn last_event_tag_id(tags: &Tags) -> Option<String> {
+    let mut last = None;
+    for tag in tags.iter() {
+        if tag.kind() == TagKind::e() {
+            last = tag.content().map(|s| s.to_string());
+        }
+    }
+    last
 }
 
 /// Parse a `pika-prompt-response` code block from message content.
@@ -791,6 +808,7 @@ mod tests {
             sender_name: None,
             content: content.to_string(),
             display_content: content.to_string(),
+            reply_to_message_id: None,
             mentions: vec![],
             timestamp,
             is_mine: false,
@@ -800,6 +818,25 @@ mod tests {
             my_poll_vote: None,
             html_state: None,
         }
+    }
+
+    #[test]
+    fn first_event_tag_id_uses_first_e_tag() {
+        let mut tags = Tags::new();
+        tags.push(Tag::parse(vec!["e", "first"]).unwrap());
+        tags.push(Tag::parse(vec!["e", "second"]).unwrap());
+
+        assert_eq!(first_event_tag_id(&tags).as_deref(), Some("first"));
+    }
+
+    #[test]
+    fn last_event_tag_id_uses_last_e_tag() {
+        let mut tags = Tags::new();
+        tags.push(Tag::parse(vec!["e", "first"]).unwrap());
+        tags.push(Tag::parse(vec!["k", "9"]).unwrap());
+        tags.push(Tag::parse(vec!["e", "second"]).unwrap());
+
+        assert_eq!(last_event_tag_id(&tags).as_deref(), Some("second"));
     }
 
     #[test]

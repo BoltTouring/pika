@@ -65,6 +65,7 @@ struct DesktopApp {
     new_chat_search: String,
     filtered_follows: Vec<pika_core::FollowListEntry>,
     message_input: String,
+    reply_to_message_id: Option<String>,
     optimistic_selected_chat_id: Option<String>,
     overlay: UiOverlay,
     // Group creation
@@ -103,6 +104,9 @@ pub enum Message {
     OpenChat(String),
     MessageChanged(String),
     SendMessage,
+    SetReplyTarget(String),
+    CancelReplyTarget,
+    JumpToMessage(String),
     ClearToast,
     // Group creation
     ToggleNewGroupForm,
@@ -216,6 +220,7 @@ impl DesktopApp {
                 self.avatar_cache.borrow_mut().clear();
                 self.optimistic_selected_chat_id = None;
                 self.profile_toast = None;
+                self.reply_to_message_id = None;
                 self.clear_all_overlays();
             }
             Message::ResetLocalSessionData => {
@@ -224,6 +229,7 @@ impl DesktopApp {
                     manager.dispatch(AppAction::ClearToast);
                 }
                 self.optimistic_selected_chat_id = None;
+                self.reply_to_message_id = None;
                 self.clear_all_overlays();
             }
             Message::ResetRelayConfig => {
@@ -299,6 +305,18 @@ impl DesktopApp {
                     self.message_input.clear();
                     self.emoji_picker_message_id = None;
                 }
+            }
+            Message::SetReplyTarget(message_id) => {
+                self.reply_to_message_id = Some(message_id);
+            }
+            Message::CancelReplyTarget => {
+                self.reply_to_message_id = None;
+            }
+            Message::JumpToMessage(message_id) => {
+                let Some(chat) = &self.state.current_chat else {
+                    return Task::none();
+                };
+                return views::conversation::jump_to_message_task(chat, &message_id);
             }
             Message::ClearToast => {
                 if self.profile_toast.is_some() {
@@ -730,6 +748,7 @@ impl DesktopApp {
             new_chat_search: String::new(),
             filtered_follows: Vec::new(),
             message_input: String::new(),
+            reply_to_message_id: None,
             optimistic_selected_chat_id: None,
             overlay: UiOverlay::None,
             group_name_input: String::new(),
@@ -804,6 +823,17 @@ impl DesktopApp {
             }
 
             self.state = latest;
+            if let Some(reply_id) = self.reply_to_message_id.as_ref() {
+                let still_present = self
+                    .state
+                    .current_chat
+                    .as_ref()
+                    .map(|chat| chat.messages.iter().any(|msg| &msg.id == reply_id))
+                    .unwrap_or(false);
+                if !still_present {
+                    self.reply_to_message_id = None;
+                }
+            }
             if matches!(self.overlay, UiOverlay::NewChat | UiOverlay::NewGroup) {
                 self.refilter_follows();
             }
