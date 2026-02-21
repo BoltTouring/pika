@@ -2,6 +2,33 @@ import AVFoundation
 import os
 import VideoToolbox
 
+/// Thread-safe container for state shared between @MainActor and the capture queue.
+private final class SharedCaptureState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _compressionSession: VTCompressionSession?
+    private let _core: (any AppCore)?
+
+    init(core: (any AppCore)?) {
+        _core = core
+    }
+
+    var compressionSession: VTCompressionSession? {
+        get { lock.withLock { _compressionSession } }
+        set { lock.withLock { _compressionSession = newValue } }
+    }
+
+    var core: (any AppCore)? { _core }
+
+    /// Atomically read and clear the compression session.
+    func takeCompressionSession() -> VTCompressionSession? {
+        lock.withLock {
+            let s = _compressionSession
+            _compressionSession = nil
+            return s
+        }
+    }
+}
+
 /// Manages camera capture and H.264 encoding for video calls.
 /// Captures from the front camera at 720p 30fps, encodes to H.264 Annex B NALUs,
 /// and pushes them to Rust core via `ffiApp.sendVideoFrame()`.
@@ -13,15 +40,12 @@ final class VideoCaptureManager: NSObject {
     private var currentCameraPosition: AVCaptureDevice.Position = .front
     private var isRunning = false
 
-    /// Lock-protected state accessed from both @MainActor and processingQueue.
-    private let sharedLock = NSLock()
-    private var _compressionSession: VTCompressionSession?
-    private var _core: (any AppCore)?
+    private let shared: SharedCaptureState
 
-    private static let log = Logger(subsystem: "chat.pika", category: "VideoCaptureManager")
+    private nonisolated(unsafe) static let log = Logger(subsystem: "chat.pika", category: "VideoCaptureManager")
 
     init(core: (any AppCore)?) {
-        self._core = core
+        self.shared = SharedCaptureState(core: core)
         super.init()
     }
 
@@ -45,12 +69,7 @@ final class VideoCaptureManager: NSObject {
             self?.captureSession.stopRunning()
         }
 
-        sharedLock.lock()
-        let session = _compressionSession
-        _compressionSession = nil
-        sharedLock.unlock()
-
-        if let session {
+        if let session = shared.takeCompressionSession() {
             VTCompressionSessionInvalidate(session)
         }
     }
@@ -141,12 +160,7 @@ final class VideoCaptureManager: NSObject {
     }
 
     private func setupEncoder() {
-        sharedLock.lock()
-        let oldSession = _compressionSession
-        _compressionSession = nil
-        sharedLock.unlock()
-
-        if let oldSession {
+        if let oldSession = shared.takeCompressionSession() {
             VTCompressionSessionInvalidate(oldSession)
         }
 
@@ -184,9 +198,7 @@ final class VideoCaptureManager: NSObject {
 
         VTCompressionSessionPrepareToEncodeFrames(session)
 
-        sharedLock.lock()
-        _compressionSession = session
-        sharedLock.unlock()
+        shared.compressionSession = session
     }
 
     private func camera(for position: AVCaptureDevice.Position) -> AVCaptureDevice? {
@@ -194,11 +206,7 @@ final class VideoCaptureManager: NSObject {
     }
 
     private nonisolated func encodeFrame(_ pixelBuffer: CVPixelBuffer, presentationTime: CMTime) {
-        sharedLock.lock()
-        let session = _compressionSession
-        sharedLock.unlock()
-
-        guard let session else { return }
+        guard let session = shared.compressionSession else { return }
 
         var flags: VTEncodeInfoFlags = []
         let status = VTCompressionSessionEncodeFrame(
@@ -221,12 +229,7 @@ final class VideoCaptureManager: NSObject {
     private nonisolated func handleEncodedFrame(_ sampleBuffer: CMSampleBuffer) {
         // Extract Annex B NALUs from the CMSampleBuffer
         guard let annexB = sampleBufferToAnnexB(sampleBuffer) else { return }
-
-        sharedLock.lock()
-        let core = _core
-        sharedLock.unlock()
-
-        core?.sendVideoFrame(payload: annexB)
+        shared.core?.sendVideoFrame(payload: annexB)
     }
 
     /// Convert a CMSampleBuffer with AVCC-formatted H.264 data to Annex B format.
