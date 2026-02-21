@@ -12,6 +12,8 @@ pub fn conversation_view<'a>(
     chat: &'a ChatViewState,
     message_input: &str,
     active_call: Option<&'a CallState>,
+    emoji_picker_message_id: Option<&str>,
+    hovered_message_id: Option<&str>,
     avatar_cache: &mut super::avatar::AvatarCache,
 ) -> Element<'a, Message, Theme> {
     // ── Header bar ──────────────────────────────────────────────────
@@ -111,7 +113,9 @@ pub fn conversation_view<'a>(
         .messages
         .iter()
         .fold(column![].spacing(6).padding([8, 16]), |col, msg| {
-            col.push(message_bubble(msg, is_group))
+            let picker_open = emoji_picker_message_id == Some(msg.id.as_str());
+            let hovered = hovered_message_id == Some(msg.id.as_str());
+            col.push(message_bubble(msg, is_group, picker_open, hovered))
         });
 
     let message_scroll = scrollable(messages)

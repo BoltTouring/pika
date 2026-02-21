@@ -77,6 +77,9 @@ struct DesktopApp {
     // Group info
     group_info_name_draft: String,
     group_info_npub_input: String,
+    // Reactions
+    emoji_picker_message_id: Option<String>,
+    hovered_message_id: Option<String>,
     // Calling
     show_call_screen: bool,
 }
@@ -122,6 +125,12 @@ pub enum Message {
     RemoveGroupMember(String),
     LeaveGroup,
     GroupInfoNpubChanged(String),
+    // Reactions
+    ReactToMessage { message_id: String, emoji: String },
+    ToggleEmojiPicker(String),
+    CloseEmojiPicker,
+    HoverMessage(String),
+    UnhoverMessage,
     // Calling
     StartCall,
     AcceptCall,
@@ -255,6 +264,7 @@ impl DesktopApp {
             }
             Message::OpenChat(chat_id) => {
                 self.optimistic_selected_chat_id = Some(chat_id.clone());
+                self.emoji_picker_message_id = None;
                 self.clear_all_overlays();
                 if let Some(manager) = &self.manager {
                     manager.dispatch(AppAction::OpenChat { chat_id });
@@ -286,6 +296,7 @@ impl DesktopApp {
                         });
                     }
                     self.message_input.clear();
+                    self.emoji_picker_message_id = None;
                 }
             }
             Message::ClearToast => {
@@ -441,6 +452,36 @@ impl DesktopApp {
                     }
                 }
                 self.clear_all_overlays();
+            }
+
+            // ── Reactions ──────────────────────────────────────────
+            Message::ReactToMessage { message_id, emoji } => {
+                if let Some(chat) = &self.state.current_chat {
+                    if let Some(manager) = &self.manager {
+                        manager.dispatch(AppAction::ReactToMessage {
+                            chat_id: chat.chat_id.clone(),
+                            message_id,
+                            emoji,
+                        });
+                    }
+                }
+                self.emoji_picker_message_id = None;
+            }
+            Message::ToggleEmojiPicker(message_id) => {
+                if self.emoji_picker_message_id.as_deref() == Some(&message_id) {
+                    self.emoji_picker_message_id = None;
+                } else {
+                    self.emoji_picker_message_id = Some(message_id);
+                }
+            }
+            Message::CloseEmojiPicker => {
+                self.emoji_picker_message_id = None;
+            }
+            Message::HoverMessage(id) => {
+                self.hovered_message_id = Some(id);
+            }
+            Message::UnhoverMessage => {
+                self.hovered_message_id = None;
             }
 
             // ── Calling ──────────────────────────────────────────────
@@ -647,6 +688,8 @@ impl DesktopApp {
                     chat,
                     &self.message_input,
                     self.state.active_call.as_ref(),
+                    self.emoji_picker_message_id.as_deref(),
+                    self.hovered_message_id.as_deref(),
                     cache,
                 )
             } else {
@@ -696,6 +739,8 @@ impl DesktopApp {
             profile_toast: None,
             group_info_name_draft: String::new(),
             group_info_npub_input: String::new(),
+            emoji_picker_message_id: None,
+            hovered_message_id: None,
             show_call_screen: false,
         }
     }
