@@ -9,7 +9,7 @@ private let keychainLog = Logger(subsystem: "com.pika.app", category: "Keychain"
 /// which fail with errSecMissingEntitlement / -34018).
 final class KeychainNsecStore {
     private let service = "com.pika.app"
-    private let account = "nsec"
+    private let account: String
     /// The keychain access group shared between the main app and the NSE.
     /// On simulator, nil (shared groups aren't supported). On device, the full
     /// qualified group: "<TeamID>.<bundle_id>.shared".
@@ -28,7 +28,8 @@ final class KeychainNsecStore {
     /// and fallback is allowed.
     private var useFileFallback: Bool = false
 
-    init(keychainGroup: String? = nil, fileFallbackAllowed: Bool? = nil) {
+    init(account: String = "nsec", keychainGroup: String? = nil, fileFallbackAllowed: Bool? = nil) {
+        self.account = account
         #if targetEnvironment(simulator)
         self.accessGroup = nil
         #else

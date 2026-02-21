@@ -30,11 +30,16 @@ protocol AuthStore: AnyObject {
 }
 
 final class KeychainAuthStore: AuthStore {
-    private let localNsecStore = KeychainNsecStore(account: "nsec")
-    private let bunkerClientNsecStore = KeychainNsecStore(account: "bunker_client_nsec")
+    private let localNsecStore: KeychainNsecStore
+    private let bunkerClientNsecStore: KeychainNsecStore
     private let defaults = UserDefaults.standard
     private let modeKey = "pika.auth.mode"
     private let bunkerUriKey = "pika.auth.bunker_uri"
+
+    init(keychainGroup: String? = nil) {
+        localNsecStore = KeychainNsecStore(account: "nsec", keychainGroup: keychainGroup)
+        bunkerClientNsecStore = KeychainNsecStore(account: "bunker_client_nsec", keychainGroup: keychainGroup)
+    }
 
     func load() -> StoredAuth? {
         guard let modeRaw = defaults.string(forKey: modeKey) else {
@@ -103,15 +108,15 @@ final class AppManager: AppReconciler {
     private let core: AppCore
     var state: AppState
     private var lastRevApplied: UInt64
-    private let nsecStore: NsecStore
+    private let authStore: AuthStore
     private let userDefaults: UserDefaults
     /// True while we're waiting for a stored session to be restored by Rust.
     var isRestoringSession: Bool = false
     private let callAudioSession = CallAudioSessionCoordinator()
 
-    init(core: AppCore, nsecStore: NsecStore, userDefaults: UserDefaults = .standard) {
+    init(core: AppCore, authStore: AuthStore, userDefaults: UserDefaults = .standard) {
         self.core = core
-        self.nsecStore = nsecStore
+        self.authStore = authStore
         self.userDefaults = userDefaults
 
         let initial = core.state()
@@ -128,9 +133,23 @@ final class AppManager: AppReconciler {
             self?.dispatch(.reregisterPush)
         }
 
-        if let nsec = nsecStore.getNsec(), !nsec.isEmpty {
+        if let stored = authStore.load() {
             isRestoringSession = true
-            core.dispatch(action: .restoreSession(nsec: nsec))
+            switch stored.mode {
+            case .localNsec:
+                if let nsec = stored.nsec, !nsec.isEmpty {
+                    core.dispatch(action: .restoreSession(nsec: nsec))
+                } else {
+                    isRestoringSession = false
+                }
+            case .bunker:
+                if let bunkerUri = stored.bunkerUri, !bunkerUri.isEmpty,
+                   let clientNsec = stored.bunkerClientNsec, !clientNsec.isEmpty {
+                    core.dispatch(action: .restoreSessionBunker(bunkerUri: bunkerUri, clientNsec: clientNsec))
+                } else {
+                    isRestoringSession = false
+                }
+            }
             PushNotificationManager.shared.requestPermissionAndRegister()
         }
     }
@@ -140,7 +159,7 @@ final class AppManager: AppReconciler {
         let keychainGroup = Bundle.main.infoDictionary?["PikaKeychainGroup"] as? String ?? ""
         let dataDirUrl = Self.resolveDataDirURL(fm: fm)
         let dataDir = dataDirUrl.path
-        let nsecStore = KeychainNsecStore(keychainGroup: keychainGroup)
+        let authStore = KeychainAuthStore(keychainGroup: keychainGroup)
 
         // One-time migration: move existing data from the old app-private container
         // to the shared App Group container so the NSE can access the MLS database.
@@ -175,7 +194,8 @@ final class AppManager: AppReconciler {
         )
 
         let core = FfiApp(dataDir: dataDir, keychainGroup: keychainGroup)
-        self.init(core: core, nsecStore: nsecStore)
+        core.setExternalSignerBridge(bridge: IOSExternalSignerBridge())
+        self.init(core: core, authStore: authStore)
     }
 
     nonisolated func reconcile(update: AppUpdate) {
@@ -271,7 +291,7 @@ final class AppManager: AppReconciler {
     }
 
     func wipeLocalDataForDeveloperTools() {
-        nsecStore.clearNsec()
+        authStore.clear()
         userDefaults.removeObject(forKey: Self.developerModeEnabledKey)
         ensureMigrationSentinelExists()
         dispatch(.wipeLocalData)
