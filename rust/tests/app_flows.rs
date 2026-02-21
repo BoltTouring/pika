@@ -135,9 +135,10 @@ fn send_message_creates_pending_then_sent() {
     });
 
     app.dispatch(AppAction::SendMessage {
-        chat_id,
+        chat_id: chat_id.clone(),
         content: "hello".into(),
         kind: None,
+        reply_to_message_id: None,
     });
     wait_until("message appears", Duration::from_secs(2), || {
         app.state()
@@ -151,6 +152,7 @@ fn send_message_creates_pending_then_sent() {
     let s1 = app.state();
     let chat = s1.current_chat.unwrap();
     let msg = chat.messages.last().unwrap();
+    let first_message_id = msg.id.clone();
     assert_eq!(msg.content, "hello");
     assert!(
         matches!(msg.delivery, pika_core::MessageDeliveryState::Pending)
@@ -165,6 +167,92 @@ fn send_message_creates_pending_then_sent() {
             .map(|m| matches!(m.delivery, pika_core::MessageDeliveryState::Sent))
             .unwrap_or(false)
     });
+
+    app.dispatch(AppAction::SendMessage {
+        chat_id,
+        content: "reply".into(),
+        kind: None,
+        reply_to_message_id: Some(first_message_id.clone()),
+    });
+    wait_until("reply appears", Duration::from_secs(2), || {
+        app.state()
+            .current_chat
+            .as_ref()
+            .and_then(|c| c.messages.last())
+            .map(|m| {
+                m.content == "reply"
+                    && m.reply_to_message_id.as_deref() == Some(first_message_id.as_str())
+            })
+            .unwrap_or(false)
+    });
+}
+
+#[test]
+fn send_message_with_unresolvable_reply_falls_back_to_plain_message() {
+    let dir = tempdir().unwrap();
+    write_config(&dir.path().to_string_lossy(), true);
+    let app = FfiApp::new(dir.path().to_string_lossy().to_string(), String::new());
+    app.dispatch(AppAction::CreateAccount);
+    wait_until("logged in", Duration::from_secs(2), || {
+        matches!(app.state().auth, AuthState::LoggedIn { .. })
+    });
+
+    let npub = match app.state().auth {
+        AuthState::LoggedIn { ref npub, .. } => npub.clone(),
+        _ => panic!("expected logged in"),
+    };
+    app.dispatch(AppAction::CreateChat { peer_npub: npub });
+    wait_until("chat created", Duration::from_secs(2), || {
+        !app.state().chat_list.is_empty()
+    });
+    let chat_id = app.state().chat_list[0].chat_id.clone();
+
+    app.dispatch(AppAction::OpenChat {
+        chat_id: chat_id.clone(),
+    });
+    wait_until("chat opened", Duration::from_secs(2), || {
+        app.state().current_chat.is_some()
+    });
+
+    let missing_reply_target =
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string();
+    app.dispatch(AppAction::SendMessage {
+        chat_id: chat_id.clone(),
+        content: "plain despite stale reply".into(),
+        kind: None,
+        reply_to_message_id: Some(missing_reply_target),
+    });
+
+    wait_until("message appears", Duration::from_secs(2), || {
+        app.state()
+            .current_chat
+            .as_ref()
+            .and_then(|c| c.messages.last())
+            .map(|m| {
+                m.content == "plain despite stale reply"
+                    && m.reply_to_message_id.is_none()
+                    && (matches!(m.delivery, pika_core::MessageDeliveryState::Pending)
+                        || matches!(m.delivery, pika_core::MessageDeliveryState::Sent))
+            })
+            .unwrap_or(false)
+    });
+
+    wait_until(
+        "stale reply send succeeds as plain text",
+        Duration::from_secs(2),
+        || {
+            app.state()
+                .current_chat
+                .as_ref()
+                .and_then(|c| c.messages.last())
+                .map(|m| {
+                    m.content == "plain despite stale reply"
+                        && m.reply_to_message_id.is_none()
+                        && matches!(m.delivery, pika_core::MessageDeliveryState::Sent)
+                })
+                .unwrap_or(false)
+        },
+    );
 }
 
 #[test]
@@ -338,6 +426,7 @@ fn restore_session_recovers_chat_history() {
         chat_id: chat_id.clone(),
         content: "persist-me".into(),
         kind: None,
+        reply_to_message_id: None,
     });
     wait_until("message persisted", Duration::from_secs(2), || {
         app.state()
@@ -431,6 +520,7 @@ fn paging_loads_older_messages_in_pages() {
             chat_id: chat_id.clone(),
             content: format!("m{i}"),
             kind: None,
+            reply_to_message_id: None,
         });
     }
     wait_until(

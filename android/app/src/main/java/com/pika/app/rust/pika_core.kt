@@ -1816,6 +1816,8 @@ data class ChatMessage (
     , 
     var `displayContent`: kotlin.String
     , 
+    var `replyToMessageId`: kotlin.String?
+    , 
     var `mentions`: List<Mention>
     , 
     var `timestamp`: kotlin.Long
@@ -1852,6 +1854,7 @@ public object FfiConverterTypeChatMessage: FfiConverterRustBuffer<ChatMessage> {
             FfiConverterOptionalString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
             FfiConverterSequenceTypeMention.read(buf),
             FfiConverterLong.read(buf),
             FfiConverterBoolean.read(buf),
@@ -1869,6 +1872,7 @@ public object FfiConverterTypeChatMessage: FfiConverterRustBuffer<ChatMessage> {
             FfiConverterOptionalString.allocationSize(value.`senderName`) +
             FfiConverterString.allocationSize(value.`content`) +
             FfiConverterString.allocationSize(value.`displayContent`) +
+            FfiConverterOptionalString.allocationSize(value.`replyToMessageId`) +
             FfiConverterSequenceTypeMention.allocationSize(value.`mentions`) +
             FfiConverterLong.allocationSize(value.`timestamp`) +
             FfiConverterBoolean.allocationSize(value.`isMine`) +
@@ -1885,6 +1889,7 @@ public object FfiConverterTypeChatMessage: FfiConverterRustBuffer<ChatMessage> {
             FfiConverterOptionalString.write(value.`senderName`, buf)
             FfiConverterString.write(value.`content`, buf)
             FfiConverterString.write(value.`displayContent`, buf)
+            FfiConverterOptionalString.write(value.`replyToMessageId`, buf)
             FfiConverterSequenceTypeMention.write(value.`mentions`, buf)
             FfiConverterLong.write(value.`timestamp`, buf)
             FfiConverterBoolean.write(value.`isMine`, buf)
@@ -2518,7 +2523,8 @@ sealed class AppAction {
     data class SendMessage(
         val `chatId`: kotlin.String, 
         val `content`: kotlin.String, 
-        val `kind`: kotlin.UShort?) : AppAction()
+        val `kind`: kotlin.UShort?, 
+        val `replyToMessageId`: kotlin.String?) : AppAction()
         
     {
         
@@ -2768,6 +2774,7 @@ public object FfiConverterTypeAppAction : FfiConverterRustBuffer<AppAction>{
                 FfiConverterString.read(buf),
                 FfiConverterString.read(buf),
                 FfiConverterOptionalUShort.read(buf),
+                FfiConverterOptionalString.read(buf),
                 )
             13 -> AppAction.RetryMessage(
                 FfiConverterString.read(buf),
@@ -2927,6 +2934,7 @@ public object FfiConverterTypeAppAction : FfiConverterRustBuffer<AppAction>{
                 + FfiConverterString.allocationSize(value.`chatId`)
                 + FfiConverterString.allocationSize(value.`content`)
                 + FfiConverterOptionalUShort.allocationSize(value.`kind`)
+                + FfiConverterOptionalString.allocationSize(value.`replyToMessageId`)
             )
         }
         is AppAction.RetryMessage -> {
@@ -3174,6 +3182,7 @@ public object FfiConverterTypeAppAction : FfiConverterRustBuffer<AppAction>{
                 FfiConverterString.write(value.`chatId`, buf)
                 FfiConverterString.write(value.`content`, buf)
                 FfiConverterOptionalUShort.write(value.`kind`, buf)
+                FfiConverterOptionalString.write(value.`replyToMessageId`, buf)
                 Unit
             }
             is AppAction.RetryMessage -> {

@@ -257,6 +257,7 @@ pub struct ChatMessage {
     pub sender_name: Option<String>,
     pub content: String,
     pub display_content: String,
+    pub reply_to_message_id: Option<String>,
     pub mentions: Vec<Mention>,
     pub timestamp: i64,
     pub is_mine: bool,

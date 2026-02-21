@@ -192,6 +192,7 @@ struct LocalOutgoing {
     content: String,
     timestamp: i64,
     sender_pubkey: String,
+    reply_to_message_id: Option<String>,
     seq: u64,
 }
 
@@ -2144,6 +2145,7 @@ impl AppCore {
                 chat_id,
                 content,
                 kind,
+                reply_to_message_id,
             } => {
                 if !self.is_logged_in() {
                     self.toast("Please log in first");
@@ -2158,6 +2160,9 @@ impl AppCore {
                 if content.is_empty() {
                     return;
                 }
+                let reply_to_message_id = reply_to_message_id
+                    .map(|id| id.trim().to_string())
+                    .filter(|id| !id.is_empty());
 
                 // Nostr timestamps are second-granularity; rapid sends can share the same second.
                 // Keep outgoing timestamps monotonic to avoid tie-related paging nondeterminism.
@@ -2180,11 +2185,37 @@ impl AppCore {
                     };
 
                     // Build rumor and ensure stable id for optimistic UI.
+                    let mut tags = Vec::new();
+                    let effective_reply_to_message_id =
+                        reply_to_message_id.as_ref().and_then(|reply_to_id| {
+                            let reply_event_id = EventId::parse(reply_to_id).ok()?;
+                            let reply_target = sess
+                                .mdk
+                                .get_message(&group.mls_group_id, &reply_event_id)
+                                .ok()
+                                .flatten()?;
+                            let p_tag = Tag::parse(vec![
+                                "p".to_string(),
+                                reply_target.pubkey.to_hex(),
+                                String::new(),
+                            ])
+                            .ok()?;
+                            let k_tag = Tag::parse(vec![
+                                "k".to_string(),
+                                reply_target.kind.as_u16().to_string(),
+                            ])
+                            .ok()?;
+                            tags.push(Tag::event(reply_event_id));
+                            tags.push(p_tag);
+                            tags.push(k_tag);
+                            Some(reply_event_id.to_hex())
+                        });
+
                     let mut rumor = UnsignedEvent::new(
                         sess.keys.public_key(),
                         Timestamp::from(ts as u64),
                         kind,
-                        [],
+                        tags,
                         content.clone(),
                     );
                     rumor.ensure_id();
@@ -2209,6 +2240,7 @@ impl AppCore {
                                 content: content.clone(),
                                 timestamp: ts,
                                 sender_pubkey: sess.keys.public_key().to_hex(),
+                                reply_to_message_id: effective_reply_to_message_id.clone(),
                                 seq,
                             },
                         );
