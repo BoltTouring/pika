@@ -19,6 +19,16 @@ pub fn default_audio_track() -> TrackSpec {
     }
 }
 
+pub fn default_video_track() -> TrackSpec {
+    TrackSpec {
+        name: "video0".to_string(),
+        codec: "h264".to_string(),
+        sample_rate: 90_000,
+        channels: 0,
+        frame_ms: 33,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrackAddress {
     pub broadcast_path: String,

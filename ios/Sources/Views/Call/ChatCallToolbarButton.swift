@@ -5,6 +5,7 @@ struct ChatCallToolbarButton: View {
     let callForChat: CallState?
     let hasLiveCallElsewhere: Bool
     let onStartCall: @MainActor () -> Void
+    let onStartVideoCall: @MainActor () -> Void
     let onOpenCallScreen: @MainActor () -> Void
 
     @State private var showMicDeniedAlert = false
@@ -22,32 +23,64 @@ struct ChatCallToolbarButton: View {
     }
 
     var body: some View {
-        Button {
-            handleTap()
-        } label: {
-            Image(systemName: symbolName)
-                .font(.body.weight(.semibold))
-        }
-        .disabled(isDisabled)
-        .accessibilityIdentifier(hasLiveCallForChat ? TestIds.chatCallOpen : TestIds.chatCallStart)
-        .alert("Microphone Permission Needed", isPresented: $showMicDeniedAlert) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text("Microphone permission is required for calls.")
+        if hasLiveCallForChat {
+            Button {
+                onOpenCallScreen()
+            } label: {
+                Image(systemName: symbolName)
+                    .font(.body.weight(.semibold))
+            }
+            .accessibilityIdentifier(TestIds.chatCallOpen)
+        } else {
+            Menu {
+                Button {
+                    startMicPermissionAction {
+                        onStartCall()
+                        onOpenCallScreen()
+                    }
+                } label: {
+                    Label("Audio Call", systemImage: "phone.fill")
+                }
+
+                Button {
+                    startMicAndCameraPermissionAction {
+                        onStartVideoCall()
+                        onOpenCallScreen()
+                    }
+                } label: {
+                    Label("Video Call", systemImage: "video.fill")
+                }
+            } label: {
+                Image(systemName: symbolName)
+                    .font(.body.weight(.semibold))
+            }
+            .disabled(isDisabled)
+            .accessibilityIdentifier(TestIds.chatCallStart)
+            .alert("Permission Needed", isPresented: $showMicDeniedAlert) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text("Microphone and camera permissions are required for calls.")
+            }
         }
     }
 
-    private func handleTap() {
-        if hasLiveCallForChat {
-            onOpenCallScreen()
-            return
-        }
-
+    private func startMicPermissionAction(_ action: @escaping @MainActor () -> Void) {
         Task { @MainActor in
             let granted = await CallMicrophonePermission.ensureGranted()
             if granted {
-                onStartCall()
-                onOpenCallScreen()
+                action()
+            } else {
+                showMicDeniedAlert = true
+            }
+        }
+    }
+
+    private func startMicAndCameraPermissionAction(_ action: @escaping @MainActor () -> Void) {
+        Task { @MainActor in
+            let micGranted = await CallMicrophonePermission.ensureGranted()
+            let camGranted = await CallCameraPermission.ensureGranted()
+            if micGranted && camGranted {
+                action()
             } else {
                 showMicDeniedAlert = true
             }
