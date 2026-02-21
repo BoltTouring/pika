@@ -4,12 +4,99 @@ on:
   push:
     tags:
       - "marmotd-v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (e.g. 0.5.1) — must already be bumped on master"
+        required: true
+        type: string
 
 permissions:
   contents: write
 
 jobs:
+  authorize:
+    runs-on: ubuntu-latest
+    environment:
+      name: release
+    steps:
+      - name: Enforce allowed release actors
+        run: |
+          set -euo pipefail
+          case "${GITHUB_ACTOR}" in
+            justinmoon|futurepaul|benthecarman|AnthonyRonning) ;;
+            *)
+              echo "error: actor '${GITHUB_ACTOR}' is not allowed to run release workflow"
+              exit 1
+              ;;
+          esac
+
+  tag-release:
+    if: github.event_name == 'workflow_dispatch'
+    needs: authorize
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+
+      - name: Validate and tag
+        id: tag
+        run: |
+          set -euo pipefail
+          version="${{ inputs.version }}"
+          tag="marmotd-v${version}"
+
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "error: version must be x.y.z (got: $version)"
+            exit 1
+          fi
+
+          # Verify the version is already bumped in source files
+          cargo_version=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/marmotd/Cargo.toml)
+          if [ "$cargo_version" != "$version" ]; then
+            echo "error: Cargo.toml version is $cargo_version but expected $version"
+            echo "hint: bump versions first via PR, then run this workflow"
+            exit 1
+          fi
+
+          pkg_version=$(node -p "require('./openclaw-marmot/openclaw/extensions/marmot/package.json').version")
+          if [ "$pkg_version" != "$version" ]; then
+            echo "error: package.json version is $pkg_version but expected $version"
+            echo "hint: bump versions first via PR, then run this workflow"
+            exit 1
+          fi
+
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null 2>&1; then
+            echo "error: tag already exists: $tag"
+            exit 1
+          fi
+
+          git tag "$tag"
+          git push origin "$tag"
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  resolve-tag:
+    needs: [authorize, tag-release]
+    if: always() && needs.authorize.result == 'success'
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+    steps:
+      - name: Resolve tag
+        id: resolve
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ needs.tag-release.outputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
   build-linux:
+    needs: resolve-tag
     strategy:
       fail-fast: false
       matrix:
@@ -23,6 +110,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-tag.outputs.tag }}
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -48,6 +137,7 @@ jobs:
           if-no-files-found: error
 
   build-macos:
+    needs: resolve-tag
     strategy:
       fail-fast: false
       matrix:
@@ -59,6 +149,8 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-tag.outputs.tag }}
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -85,6 +177,7 @@ jobs:
 
   publish-release:
     needs:
+      - resolve-tag
       - build-linux
       - build-macos
     runs-on: ubuntu-latest
@@ -98,13 +191,18 @@ jobs:
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.resolve-tag.outputs.tag }}
           files: dist/*
 
   publish-npm:
-    needs: publish-release
+    needs:
+      - resolve-tag
+      - publish-release
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-tag.outputs.tag }}
 
       - uses: actions/setup-node@v4
         with:
