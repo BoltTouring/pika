@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.0
+
+- Fix: publish `i` (KeyPackageRef) tag on key package events for Pika v0.2.8+ compatibility.
+- Feat: typing indicators (eager fire before profile fetch + agent dispatch).
+- Feat: per-group users, systemPrompt, and wildcard group support.
+- Feat: `SendAudioFile` command for pre-synthesized audio.
+- Fix: suppress STT feedback loop during TTS playback.
+- Fix: stop spurious auto-restart loop when sidecar is already running.
+
 ## 0.3.2
 
 - Fix: use sledtools/pika as default sidecar repo for binary downloads.
