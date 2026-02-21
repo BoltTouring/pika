@@ -19,6 +19,7 @@ mod daemon;
 
 #[derive(Debug, Parser)]
 #[command(name = "marmotd")]
+#[command(version)]
 #[command(about = "Marmot interop lab harness (Rust track)")]
 struct Cli {
     #[command(subcommand)]
