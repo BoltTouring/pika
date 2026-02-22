@@ -123,14 +123,10 @@ impl AppCore {
             let local_last_at = local_last.as_ref().map(|m| m.timestamp);
 
             let (last_message, last_message_at) = match (stored_last_message_at, local_last_at) {
-                (Some(a), Some(b)) if b > a => (
-                    local_last.as_ref().map(|m| m.content.clone()),
-                    Some(b),
-                ),
-                (None, Some(b)) => (
-                    local_last.as_ref().map(|m| m.content.clone()),
-                    Some(b),
-                ),
+                (Some(a), Some(b)) if b > a => {
+                    (local_last.as_ref().map(|m| m.content.clone()), Some(b))
+                }
+                (None, Some(b)) => (local_last.as_ref().map(|m| m.content.clone()), Some(b)),
                 _ => (stored_last_message, stored_last_message_at),
             };
 
