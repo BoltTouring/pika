@@ -86,14 +86,6 @@ def main():
             log(f"marmotd ready, pubkey={my_pubkey}")
             send_to_marmotd({"cmd": "publish_keypackage"})
 
-        elif msg_type == "welcome_received":
-            wrapper_event_id = msg.get("wrapper_event_id")
-            if wrapper_event_id:
-                send_to_marmotd({
-                    "cmd": "accept_welcome",
-                    "wrapper_event_id": wrapper_event_id,
-                })
-
         elif msg_type == "message_received":
             if msg.get("from_pubkey") == my_pubkey:
                 continue
