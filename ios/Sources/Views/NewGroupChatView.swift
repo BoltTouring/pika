@@ -13,9 +13,10 @@ struct NewGroupChatView: View {
     @State private var showScanner = false
 
     private var filteredFollowList: [FollowListEntry] {
-        guard !searchText.isEmpty else { return state.followList }
+        let base = state.followList.filter { $0.npub != state.myNpub }
+        guard !searchText.isEmpty else { return base }
         let query = searchText.lowercased()
-        return state.followList.filter { entry in
+        return base.filter { entry in
             if let name = entry.name, name.lowercased().contains(query) { return true }
             if let username = entry.username, username.lowercased().contains(query) { return true }
             if entry.npub.lowercased().contains(query) { return true }
