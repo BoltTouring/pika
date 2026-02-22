@@ -512,7 +512,7 @@ impl AppCore {
 
         let mut older: Vec<ChatMessage> = page
             .into_iter()
-            .filter(|m| m.kind == Kind::ChatMessage || m.kind == Kind::Reaction)
+            .filter(|m| m.kind == Kind::ChatMessage)
             .rev()
             .map(|m| {
                 let id = m.id.to_hex();
