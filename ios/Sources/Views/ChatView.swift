@@ -240,7 +240,7 @@ struct ChatView: View {
                         .padding(.bottom, 24)
                     }
                 }
-                .transition(.opacity)
+                .transition(.opacity.combined(with: .scale(scale: 0.95, anchor: .top)))
             }
         }
         .sheet(isPresented: $showContextEmojiPicker) {
@@ -283,6 +283,7 @@ struct ChatView: View {
                                         onReact: onReact,
                                         activeReactionMessageId: $activeReactionMessageId,
                                         onLongPressMessage: { message in
+                                            isInputFocused = false
                                             withAnimation(.spring(response: 0.3, dampingFraction: 0.78)) {
                                                 activeReactionMessageId = message.id
                                                 contextMenuMessage = message
@@ -1446,6 +1447,8 @@ private struct MessageBubble: View {
     var onLongPressMessage: ((ChatMessage) -> Void)? = nil
     var onDownloadMedia: ((String, String) -> Void)? = nil
 
+    @State private var isBeingPressed = false
+
     private let roundedCornerRadius: CGFloat = 16
     private let groupedCornerRadius: CGFloat = 6
 
@@ -1507,8 +1510,12 @@ private struct MessageBubble: View {
             }
         }
         .contentShape(Rectangle())
-        .onLongPressGesture(minimumDuration: 0.8, maximumDistance: 44) {
+        .scaleEffect(isBeingPressed ? 0.96 : 1.0)
+        .animation(.spring(response: 0.25, dampingFraction: 0.7), value: isBeingPressed)
+        .onLongPressGesture(minimumDuration: 0.5, maximumDistance: 44) {
             handleLongPress()
+        } onPressingChanged: { pressing in
+            isBeingPressed = pressing
         }
         .opacity(activeReactionMessageId == message.id ? 0 : 1)
         .animation(.easeInOut(duration: 0.15), value: activeReactionMessageId == message.id)
