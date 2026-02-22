@@ -1184,12 +1184,23 @@ impl DesktopApp {
             &self.state.follow_list
         };
 
+        // Filter out ourselves from the list.
+        let my_npub = match &self.state.auth {
+            AuthState::LoggedIn { npub, .. } => Some(npub.as_str()),
+            _ => None,
+        };
+        let base: Vec<_> = source
+            .iter()
+            .filter(|e| my_npub != Some(e.npub.as_str()))
+            .cloned()
+            .collect();
+
         if self.new_chat_search.is_empty() {
-            self.filtered_follows = source.clone();
+            self.filtered_follows = base;
         } else {
             let q = self.new_chat_search.to_lowercase();
-            self.filtered_follows = source
-                .iter()
+            self.filtered_follows = base
+                .into_iter()
                 .filter(|e| {
                     e.name.as_deref().unwrap_or("").to_lowercase().contains(&q)
                         || e.username
@@ -1199,7 +1210,6 @@ impl DesktopApp {
                             .contains(&q)
                         || e.npub.to_lowercase().contains(&q)
                 })
-                .cloned()
                 .collect();
         }
     }

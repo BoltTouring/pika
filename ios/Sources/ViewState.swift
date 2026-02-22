@@ -15,12 +15,14 @@ struct NewChatViewState: Equatable {
     let isCreatingChat: Bool
     let isFetchingFollowList: Bool
     let followList: [FollowListEntry]
+    let myNpub: String?
 }
 
 struct NewGroupChatViewState: Equatable {
     let isCreatingChat: Bool
     let isFetchingFollowList: Bool
     let followList: [FollowListEntry]
+    let myNpub: String?
 }
 
 struct ChatScreenState: Equatable {

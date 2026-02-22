@@ -51,6 +51,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.pika.app.AppManager
 import com.pika.app.rust.AppAction
+import com.pika.app.rust.AuthState
 import com.pika.app.rust.FollowListEntry
 import com.pika.app.ui.Avatar
 import com.pika.app.ui.PeerKeyNormalizer
@@ -72,12 +73,14 @@ fun NewGroupChatScreen(manager: AppManager, padding: PaddingValues) {
     val isCreating = manager.state.busy.creatingChat
     val isFetchingFollows = manager.state.busy.fetchingFollowList
     val followList = manager.state.followList
+    val myNpub = (manager.state.auth as? AuthState.LoggedIn)?.npub
 
-    val filteredFollows = remember(followList, searchText) {
-        if (searchText.isBlank()) followList
+    val filteredFollows = remember(followList, searchText, myNpub) {
+        val base = followList.filter { it.npub != myNpub }
+        if (searchText.isBlank()) base
         else {
             val query = searchText.lowercase()
-            followList.filter { entry ->
+            base.filter { entry ->
                 entry.name?.lowercase()?.contains(query) == true ||
                     entry.username?.lowercase()?.contains(query) == true ||
                     entry.npub.lowercase().contains(query) ||

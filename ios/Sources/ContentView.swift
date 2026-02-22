@@ -388,7 +388,8 @@ private func newChatState(from state: AppState) -> NewChatViewState {
     NewChatViewState(
         isCreatingChat: state.busy.creatingChat,
         isFetchingFollowList: state.busy.fetchingFollowList,
-        followList: state.followList
+        followList: state.followList,
+        myNpub: myNpub(from: state)
     )
 }
 
@@ -397,7 +398,8 @@ private func newGroupChatState(from state: AppState) -> NewGroupChatViewState {
     NewGroupChatViewState(
         isCreatingChat: state.busy.creatingChat,
         isFetchingFollowList: state.busy.fetchingFollowList,
-        followList: state.followList
+        followList: state.followList,
+        myNpub: myNpub(from: state)
     )
 }
 
