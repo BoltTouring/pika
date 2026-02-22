@@ -22,6 +22,7 @@ struct ChatView: View {
     let onTapSender: (@MainActor (String) -> Void)?
     let onReact: (@MainActor (String, String) -> Void)?
     let onTypingStarted: (@MainActor () -> Void)?
+    let onDownloadMedia: (@MainActor (String, String, String) -> Void)?
     @State private var messageText = ""
     @State private var isAtBottom = true
     @State private var shouldStickToBottom = true
@@ -52,7 +53,8 @@ struct ChatView: View {
         onGroupInfo: (@MainActor () -> Void)? = nil,
         onTapSender: (@MainActor (String) -> Void)? = nil,
         onReact: (@MainActor (String, String) -> Void)? = nil,
-        onTypingStarted: (@MainActor () -> Void)? = nil
+        onTypingStarted: (@MainActor () -> Void)? = nil,
+        onDownloadMedia: (@MainActor (String, String, String) -> Void)? = nil
     ) {
         self.chatId = chatId
         self.state = state
@@ -66,6 +68,7 @@ struct ChatView: View {
         self.onTapSender = onTapSender
         self.onReact = onReact
         self.onTypingStarted = onTypingStarted
+        self.onDownloadMedia = onDownloadMedia
     }
 
     var body: some View {
@@ -264,6 +267,9 @@ struct ChatView: View {
                                                 contextMenuMessage = message
                                                 showContextActionCard = true
                                             }
+                                        },
+                                        onDownloadMedia: onDownloadMedia.map { callback in
+                                            { messageId, hash in callback(chatId, messageId, hash) }
                                         }
                                     )
                                 case .callEvent(let event):
@@ -798,24 +804,42 @@ private struct FocusedMessageCard: View {
     let maxWidth: CGFloat
     let maxHeight: CGFloat
 
+    private var hasMedia: Bool { !message.media.isEmpty }
+    private var hasText: Bool {
+        !message.displayContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     var body: some View {
-        VStack(alignment: message.isMine ? .trailing : .leading, spacing: 6) {
-            if isLikelyLongMessage {
-                ScrollView(showsIndicators: false) {
-                    markdownContent
+        VStack(alignment: message.isMine ? .trailing : .leading, spacing: 0) {
+            if hasMedia {
+                ForEach(message.media, id: \.originalHashHex) { attachment in
+                    MediaAttachmentView(
+                        attachment: attachment,
+                        isMine: message.isMine
+                    )
                 }
-                .frame(maxHeight: maxHeight)
-            } else {
-                markdownContent
             }
 
-            Text(Date(timeIntervalSince1970: TimeInterval(message.timestamp)).formatted(date: .omitted, time: .shortened))
-                .font(.caption2)
-                .foregroundStyle(message.isMine ? Color.white.opacity(0.78) : Color.secondary.opacity(0.9))
+            VStack(alignment: message.isMine ? .trailing : .leading, spacing: 6) {
+                if hasText {
+                    if isLikelyLongMessage {
+                        ScrollView(showsIndicators: false) {
+                            markdownContent
+                        }
+                        .frame(maxHeight: maxHeight)
+                    } else {
+                        markdownContent
+                    }
+                }
+
+                Text(Date(timeIntervalSince1970: TimeInterval(message.timestamp)).formatted(date: .omitted, time: .shortened))
+                    .font(.caption2)
+                    .foregroundStyle(message.isMine ? Color.white.opacity(0.78) : Color.secondary.opacity(0.9))
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, hasMedia && hasText ? 6 : 8)
+            .padding(.bottom, 6)
         }
-        .padding(.horizontal, 12)
-        .padding(.top, 8)
-        .padding(.bottom, 6)
         .background(message.isMine ? Color.blue : Color(uiColor: .systemGray5))
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .frame(maxWidth: maxWidth, alignment: message.isMine ? .trailing : .leading)
@@ -1089,6 +1113,7 @@ private struct MessageGroupRow: View {
     var onReact: ((String, String) -> Void)?
     @Binding var activeReactionMessageId: String?
     var onLongPressMessage: ((ChatMessage) -> Void)? = nil
+    var onDownloadMedia: ((String, String) -> Void)? = nil
 
     private let avatarSize: CGFloat = 24
     private let avatarGutterWidth: CGFloat = 28
@@ -1130,7 +1155,8 @@ private struct MessageGroupRow: View {
                     onReact: onReact,
                     onJumpToMessage: onJumpToMessage,
                     activeReactionMessageId: $activeReactionMessageId,
-                    onLongPressMessage: onLongPressMessage
+                    onLongPressMessage: onLongPressMessage,
+                    onDownloadMedia: onDownloadMedia
                 )
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -1151,7 +1177,8 @@ private struct MessageGroupRow: View {
                     onReact: onReact,
                     onJumpToMessage: onJumpToMessage,
                     activeReactionMessageId: $activeReactionMessageId,
-                    onLongPressMessage: onLongPressMessage
+                    onLongPressMessage: onLongPressMessage,
+                    onDownloadMedia: onDownloadMedia
                 )
                 if let delivery = group.messages.last?.delivery {
                     Text(deliveryText(delivery))
@@ -1180,6 +1207,7 @@ private struct MessageBubbleStack: View {
     var onJumpToMessage: ((String) -> Void)? = nil
     @Binding var activeReactionMessageId: String?
     var onLongPressMessage: ((ChatMessage) -> Void)? = nil
+    var onDownloadMedia: ((String, String) -> Void)? = nil
 
     var body: some View {
         VStack(alignment: group.isMine ? .trailing : .leading, spacing: 2) {
@@ -1192,7 +1220,8 @@ private struct MessageBubbleStack: View {
                     onReact: onReact,
                     onJumpToMessage: onJumpToMessage,
                     activeReactionMessageId: $activeReactionMessageId,
-                    onLongPressMessage: onLongPressMessage
+                    onLongPressMessage: onLongPressMessage,
+                    onDownloadMedia: onDownloadMedia
                 )
                 .id(message.id)
             }
@@ -1207,6 +1236,107 @@ private struct MessageBubbleStack: View {
     }
 }
 
+private struct MediaAttachmentView: View {
+    let attachment: ChatMediaAttachment
+    let isMine: Bool
+    var onDownload: (() -> Void)? = nil
+
+    private let maxMediaWidth: CGFloat = 240
+
+    private var isImage: Bool {
+        attachment.mimeType.hasPrefix("image/")
+    }
+
+    private var aspectRatio: CGFloat {
+        if let w = attachment.width, let h = attachment.height, w > 0, h > 0 {
+            return CGFloat(w) / CGFloat(h)
+        }
+        return 4.0 / 3.0
+    }
+
+    var body: some View {
+        if isImage {
+            imageContent
+        } else {
+            fileRow
+        }
+    }
+
+    @ViewBuilder
+    private var imageContent: some View {
+        if let localPath = attachment.localPath {
+            CachedAsyncImage(url: URL(fileURLWithPath: localPath)) { image in
+                image
+                    .resizable()
+                    .scaledToFill()
+            } placeholder: {
+                imagePlaceholder
+            }
+            .frame(width: maxMediaWidth, height: maxMediaWidth / aspectRatio)
+            .clipped()
+        } else {
+            Button {
+                onDownload?()
+            } label: {
+                ZStack {
+                    imagePlaceholder
+                    VStack(spacing: 6) {
+                        Image(systemName: "arrow.down.circle")
+                            .font(.title)
+                            .foregroundStyle(.white)
+                        Text(attachment.filename)
+                            .font(.caption2)
+                            .foregroundStyle(.white.opacity(0.8))
+                            .lineLimit(1)
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+            .frame(width: maxMediaWidth, height: maxMediaWidth / aspectRatio)
+        }
+    }
+
+    private var imagePlaceholder: some View {
+        Rectangle()
+            .fill(isMine ? Color.white.opacity(0.15) : Color.gray.opacity(0.2))
+            .frame(width: maxMediaWidth, height: maxMediaWidth / aspectRatio)
+    }
+
+    private var fileRow: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "doc")
+                .font(.title3)
+                .foregroundStyle(isMine ? .white.opacity(0.8) : .secondary)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(attachment.filename)
+                    .font(.subheadline)
+                    .foregroundStyle(isMine ? .white : .primary)
+                    .lineLimit(1)
+                Text(attachment.mimeType)
+                    .font(.caption2)
+                    .foregroundStyle(isMine ? .white.opacity(0.6) : .secondary)
+            }
+
+            Spacer(minLength: 0)
+
+            if attachment.localPath == nil {
+                Button {
+                    onDownload?()
+                } label: {
+                    Image(systemName: "arrow.down.circle")
+                        .font(.title3)
+                        .foregroundStyle(isMine ? .white : .blue)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .frame(maxWidth: maxMediaWidth)
+    }
+}
+
 private struct MessageBubble: View {
     let message: ChatMessage
     let position: GroupedBubblePosition
@@ -1216,11 +1346,17 @@ private struct MessageBubble: View {
     var onJumpToMessage: ((String) -> Void)? = nil
     @Binding var activeReactionMessageId: String?
     var onLongPressMessage: ((ChatMessage) -> Void)? = nil
+    var onDownloadMedia: ((String, String) -> Void)? = nil
 
     private let roundedCornerRadius: CGFloat = 16
     private let groupedCornerRadius: CGFloat = 6
 
     private let reactionChipOverlap: CGFloat = 10
+
+    private var hasMedia: Bool { !message.media.isEmpty }
+    private var hasText: Bool {
+        !message.displayContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 
     var body: some View {
         let hasReactions = !message.reactions.isEmpty
@@ -1237,30 +1373,36 @@ private struct MessageBubble: View {
                 .padding(.bottom, 3)
             }
 
-            ForEach(segments) { segment in
-                switch segment {
-                case .markdown(let text):
-                    markdownBubble(text: text)
-                case .pikaPrompt(let prompt):
-                    PikaPromptView(prompt: prompt, message: message, onSelect: {
-                        onSendMessage($0, nil)
-                    })
-                case .pikaHtml(_, let html, let state):
-                    PikaHtmlView(html: html, htmlState: state, onSendMessage: {
-                        onSendMessage($0, nil)
-                    })
+            if hasMedia {
+                mediaBubble(segments: segments)
+            } else {
+                ForEach(segments) { segment in
+                    switch segment {
+                    case .markdown(let text):
+                        markdownBubble(text: text)
+                    case .pikaPrompt(let prompt):
+                        PikaPromptView(prompt: prompt, message: message, onSelect: {
+                            onSendMessage($0, nil)
+                        })
+                    case .pikaHtml(_, let html, let state):
+                        PikaHtmlView(html: html, htmlState: state, onSendMessage: {
+                            onSendMessage($0, nil)
+                        })
+                    }
                 }
             }
-            .overlay(alignment: message.isMine ? .bottomLeading : .bottomTrailing) {
-                if hasReactions {
-                    ReactionChips(
-                        reactions: message.reactions,
-                        messageId: message.id,
-                        onReact: onReact
-                    )
-                    .offset(x: message.isMine ? -12 : 12, y: reactionChipOverlap)
+
+            EmptyView()
+                .overlay(alignment: message.isMine ? .bottomLeading : .bottomTrailing) {
+                    if hasReactions {
+                        ReactionChips(
+                            reactions: message.reactions,
+                            messageId: message.id,
+                            onReact: onReact
+                        )
+                        .offset(x: message.isMine ? -12 : 12, y: reactionChipOverlap)
+                    }
                 }
-            }
 
             if hasReactions {
                 Spacer().frame(height: reactionChipOverlap + 4)
@@ -1272,6 +1414,53 @@ private struct MessageBubble: View {
         }
         .opacity(activeReactionMessageId == message.id ? 0 : 1)
         .animation(.easeInOut(duration: 0.15), value: activeReactionMessageId == message.id)
+    }
+
+    @ViewBuilder
+    private func mediaBubble(segments: [MessageSegment]) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(message.media, id: \.originalHashHex) { attachment in
+                MediaAttachmentView(
+                    attachment: attachment,
+                    isMine: message.isMine,
+                    onDownload: {
+                        onDownloadMedia?(message.id, attachment.originalHashHex)
+                    }
+                )
+            }
+
+            if hasText {
+                VStack(alignment: .leading, spacing: 3) {
+                    ForEach(segments) { segment in
+                        if case .markdown(let text) = segment {
+                            Markdown(text)
+                                .markdownTheme(message.isMine ? .pikaOutgoing : .pikaIncoming)
+                                .multilineTextAlignment(.leading)
+                        }
+                    }
+                    Text(timestampText)
+                        .font(.caption2)
+                        .foregroundStyle(message.isMine ? Color.white.opacity(0.78) : Color.secondary.opacity(0.9))
+                }
+                .padding(.horizontal, 12)
+                .padding(.top, 6)
+                .padding(.bottom, 6)
+            } else {
+                HStack {
+                    Spacer()
+                    Text(timestampText)
+                        .font(.caption2)
+                        .foregroundStyle(.white.opacity(0.78))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(.black.opacity(0.4), in: Capsule())
+                }
+                .padding(6)
+                .offset(y: -6)
+            }
+        }
+        .background(message.isMine ? Color.blue : Color.gray.opacity(0.2))
+        .clipShape(UnevenRoundedRectangle(cornerRadii: bubbleRadii, style: .continuous))
     }
 
     private func markdownBubble(text: String) -> some View {
@@ -1791,6 +1980,7 @@ private enum ChatViewPreviewData {
                 isMine: false,
                 delivery: .sent,
                 reactions: [],
+                media: [],
                 pollTally: [],
                 myPollVote: nil,
                 htmlState: nil
@@ -1807,6 +1997,7 @@ private enum ChatViewPreviewData {
                 isMine: false,
                 delivery: .sent,
                 reactions: [],
+                media: [],
                 pollTally: [],
                 myPollVote: nil,
                 htmlState: nil
@@ -1833,6 +2024,7 @@ private enum ChatViewPreviewData {
                 isMine: true,
                 delivery: .sent,
                 reactions: [],
+                media: [],
                 pollTally: [],
                 myPollVote: nil,
                 htmlState: nil
@@ -1849,6 +2041,7 @@ private enum ChatViewPreviewData {
                 isMine: true,
                 delivery: .pending,
                 reactions: [],
+                media: [],
                 pollTally: [],
                 myPollVote: nil,
                 htmlState: nil
@@ -1928,6 +2121,24 @@ private enum ChatViewPreviewData {
             onStartCall: {},
             onStartVideoCall: {},
             onOpenCallScreen: {}
+        )
+    }
+}
+
+#Preview("Chat - Media") {
+    NavigationStack {
+        ChatView(
+            chatId: "chat-media",
+            state: ChatScreenState(chat: PreviewAppState.chatDetailMedia.currentChat),
+            activeCall: nil,
+            callEvents: [],
+            onSendMessage: { _, _ in },
+            onStartCall: {},
+            onStartVideoCall: {},
+            onOpenCallScreen: {},
+            onDownloadMedia: { chatId, messageId, hash in
+                print("Download: \(chatId)/\(messageId)/\(hash)")
+            }
         )
     }
 }

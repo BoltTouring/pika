@@ -285,6 +285,9 @@ private func screenView(
             },
             onTypingStarted: {
                 manager.dispatch(.typingStarted(chatId: chatId))
+            },
+            onDownloadMedia: { chatId, messageId, hash in
+                manager.dispatch(.downloadChatMedia(chatId: chatId, messageId: messageId, originalHashHex: hash))
             }
         )
         .onAppear {
