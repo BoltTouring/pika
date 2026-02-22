@@ -1,0 +1,68 @@
+name: android-debug
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache /nix
+        uses: actions/cache@v4
+        with:
+          key: nix-v1-${{ runner.os }}-${{ hashFiles('flake.lock') }}
+          restore-keys: nix-v1-${{ runner.os }}-
+          path: /nix
+
+      - name: Fix /nix ownership
+        run: |
+          if [ -d /nix ] && [ "$(stat -c %u /nix)" != "$(id -u)" ]; then
+            sudo chown -R "$(id -u):$(id -g)" /nix
+          fi
+
+      - uses: nixbuild/nix-quick-install-action@v30
+
+      - name: Cache Cargo home
+        uses: actions/cache@v4
+        with:
+          key: cargo-home-v1-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-home-v1-${{ runner.os }}-
+          path: ~/.cargo
+
+      - name: Cache Cargo target
+        uses: actions/cache@v4
+        with:
+          key: cargo-target-v1-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-target-v1-${{ runner.os }}-
+          path: target
+
+      - name: Build debug APK
+        run: nix develop .#default -c just android-assemble
+
+      - name: Get version
+        id: ver
+        run: echo "name=$(./scripts/version-read --name)" >> "$GITHUB_OUTPUT"
+
+      - name: Publish pre-release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: debug-latest
+          name: "Debug build v${{ steps.ver.outputs.name }}"
+          prerelease: true
+          generate_release_notes: false
+          body: |
+            Automated debug build from `master` branch.
+
+            **This is an unsigned debug APK** — for testing only, not for production use.
+
+            To install: download the APK, enable "Install unknown apps" on your Android device, and open the file.
+          overwrite_files: true
+          files: android/app/build/outputs/apk/debug/app-debug.apk
