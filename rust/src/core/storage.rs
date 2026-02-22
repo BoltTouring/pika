@@ -30,7 +30,6 @@ impl AppCore {
         };
 
         let my_pubkey = sess.pubkey;
-        let my_pubkey_hex = my_pubkey.to_hex();
         let mut index: HashMap<String, GroupIndexEntry> = HashMap::new();
         let mut list: Vec<ChatSummary> = Vec::new();
         let mut missing_profile_pubkeys: Vec<PublicKey> = Vec::new();
