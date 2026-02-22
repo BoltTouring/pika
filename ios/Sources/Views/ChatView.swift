@@ -35,6 +35,10 @@ struct ChatView: View {
     @State private var insertedMentions: [(display: String, npub: String)] = []
     @State private var replyDraftMessage: ChatMessage?
     @FocusState private var isInputFocused: Bool
+    @State private var newMessageCount = 0
+    @State private var firstUnreadMessageId: String?
+    @State private var didSetInitialUnread = false
+    let initialUnreadCount: Int
 
     private let scrollButtonBottomPadding: CGFloat = 12
     private let bottomVisibilityTolerance: CGFloat = 100
@@ -45,6 +49,7 @@ struct ChatView: View {
         state: ChatScreenState,
         activeCall: CallState?,
         callEvents: [CallTimelineEvent],
+        initialUnreadCount: Int = 0,
         onSendMessage: @escaping @MainActor (String, String?) -> Void,
         onStartCall: @escaping @MainActor () -> Void,
         onStartVideoCall: @escaping @MainActor () -> Void,
@@ -58,6 +63,7 @@ struct ChatView: View {
         self.state = state
         self.activeCall = activeCall
         self.callEvents = callEvents
+        self.initialUnreadCount = initialUnreadCount
         self.onSendMessage = onSendMessage
         self.onStartCall = onStartCall
         self.onStartVideoCall = onStartVideoCall
@@ -125,6 +131,15 @@ struct ChatView: View {
                         }
                     }
                     .buttonStyle(.plain)
+                }
+
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        onTapSender?(peer.pubkey)
+                    } label: {
+                        Image(systemName: "info.circle")
+                    }
+                    .accessibilityLabel("Contact info")
                 }
 
                 ToolbarItem(placement: .topBarTrailing) {
@@ -268,6 +283,8 @@ struct ChatView: View {
                                     )
                                 case .callEvent(let event):
                                     CallTimelineEventRow(event: event)
+                                case .newMessagesDivider:
+                                    NewMessagesDividerRow()
                                 }
                             }
 
@@ -330,8 +347,33 @@ struct ChatView: View {
                     guard shouldStickToBottom else { return }
                     scrollToBottom(using: proxy, animated: true)
                 }
+                .onChange(of: chat.messages.count) { oldCount, newCount in
+                    guard newCount > oldCount else { return }
+                    // Set the initial unread divider once when messages first load
+                    if !didSetInitialUnread && initialUnreadCount > 0 {
+                        let idx = max(0, newCount - initialUnreadCount)
+                        if idx < newCount {
+                            firstUnreadMessageId = chat.messages[idx].id
+                        }
+                        didSetInitialUnread = true
+                        shouldStickToBottom = false
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                            withAnimation(.easeOut(duration: 0.3)) {
+                                proxy.scrollTo("unread-divider", anchor: .top)
+                            }
+                        }
+                        return
+                    }
+                    // While scrolled up, count new incoming messages
+                    if !shouldStickToBottom {
+                        newMessageCount += newCount - oldCount
+                    }
+                }
                 .onChange(of: chat.chatId) { _, _ in
                     shouldStickToBottom = true
+                    firstUnreadMessageId = nil
+                    didSetInitialUnread = false
+                    newMessageCount = 0
                     scrollToBottom(using: proxy, animated: false)
                 }
                 .onAppear {
@@ -339,22 +381,43 @@ struct ChatView: View {
                         scrollToBottom(using: proxy, animated: false)
                     }
                 }
+                // Scroll to bottom when keyboard appears so the input and latest message are visible
+                .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
+                    guard shouldStickToBottom else { return }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                        scrollToBottom(using: proxy, animated: true)
+                    }
+                }
                 .overlay(alignment: .bottomTrailing) {
                     if !isAtBottom {
-                        Button {
-                            shouldStickToBottom = true
-                            scrollToBottom(using: proxy, animated: true)
-                        } label: {
-                            Image(systemName: "arrow.down")
-                                .font(.footnote.weight(.semibold))
-                                .padding(10)
+                        VStack(spacing: 6) {
+                            if newMessageCount > 0 {
+                                Text("\(newMessageCount) new")
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(.white)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 4)
+                                    .background(Color.blue, in: Capsule())
+                                    .transition(.scale.combined(with: .opacity))
+                            }
+                            Button {
+                                shouldStickToBottom = true
+                                newMessageCount = 0
+                                firstUnreadMessageId = nil
+                                scrollToBottom(using: proxy, animated: true)
+                            } label: {
+                                Image(systemName: "arrow.down")
+                                    .font(.footnote.weight(.semibold))
+                                    .padding(10)
+                            }
+                            .foregroundStyle(.primary)
+                            .background(.ultraThinMaterial, in: Circle())
+                            .overlay(Circle().strokeBorder(.quaternary, lineWidth: 0.5))
+                            .accessibilityLabel("Scroll to bottom")
                         }
-                        .foregroundStyle(.primary)
-                        .background(.ultraThinMaterial, in: Circle())
-                        .overlay(Circle().strokeBorder(.quaternary, lineWidth: 0.5))
+                        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: newMessageCount)
                         .padding(.trailing, 16)
                         .padding(.bottom, scrollButtonBottomPadding)
-                        .accessibilityLabel("Scroll to bottom")
                     }
                 }
             }
@@ -443,6 +506,21 @@ struct ChatView: View {
             }
         }
 
+        // Insert the "New Messages" divider before the first unread message group
+        if let firstUnreadId = firstUnreadMessageId {
+            var insertIdx: Int? = nil
+            for (i, row) in rows.enumerated() {
+                if case .messageGroup(let group) = row,
+                   group.messages.contains(where: { $0.id == firstUnreadId }) {
+                    insertIdx = i
+                    break
+                }
+            }
+            if let idx = insertIdx {
+                rows.insert(.newMessagesDivider, at: idx)
+            }
+        }
+
         return rows
     }
 
@@ -481,6 +559,7 @@ struct ChatView: View {
     private enum ChatTimelineRow: Identifiable {
         case messageGroup(GroupedChatMessage)
         case callEvent(CallTimelineEvent)
+        case newMessagesDivider
 
         var id: String {
             switch self {
@@ -488,6 +567,8 @@ struct ChatView: View {
                 return "msg:\(group.id)"
             case .callEvent(let event):
                 return "call:\(event.id)"
+            case .newMessagesDivider:
+                return "unread-divider"
             }
         }
     }
@@ -936,6 +1017,26 @@ private struct EmojiPickerSheet: View {
     }
 }
 
+private struct NewMessagesDividerRow: View {
+    var body: some View {
+        HStack(spacing: 10) {
+            Rectangle()
+                .fill(Color.blue.opacity(0.35))
+                .frame(height: 0.5)
+            Text("NEW MESSAGES")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.blue.opacity(0.8))
+                .fixedSize()
+            Rectangle()
+                .fill(Color.blue.opacity(0.35))
+                .frame(height: 0.5)
+        }
+        .padding(.vertical, 10)
+        .padding(.horizontal, 4)
+        .id("unread-divider")
+    }
+}
+
 private struct BottomVisibleKey: PreferenceKey {
     static var defaultValue: CGFloat? = nil
     static func reduce(value: inout CGFloat?, nextValue: () -> CGFloat?) {
@@ -1267,7 +1368,7 @@ private struct MessageBubble: View {
             }
         }
         .contentShape(Rectangle())
-        .onLongPressGesture(minimumDuration: 0.8, maximumDistance: 44) {
+        .onLongPressGesture(minimumDuration: 0.4, maximumDistance: 44) {
             handleLongPress()
         }
         .opacity(activeReactionMessageId == message.id ? 0 : 1)
@@ -1279,6 +1380,7 @@ private struct MessageBubble: View {
             Markdown(text)
                 .markdownTheme(message.isMine ? .pikaOutgoing : .pikaIncoming)
                 .multilineTextAlignment(.leading)
+                .textSelection(.enabled)
 
             Text(timestampText)
                 .font(.caption2)

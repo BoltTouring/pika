@@ -259,6 +259,7 @@ private func screenView(
             state: chatScreenState(from: state),
             activeCall: state.activeCall,
             callEvents: state.callTimeline.filter { $0.chatId == chatId },
+            initialUnreadCount: Int(state.chatList.first(where: { $0.chatId == chatId })?.unreadCount ?? 0),
             onSendMessage: { message, replyToMessageId in
                 manager.dispatch(
                     .sendMessage(
