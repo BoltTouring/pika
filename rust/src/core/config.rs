@@ -20,12 +20,14 @@ const DEFAULT_KEY_PACKAGE_RELAY_URLS: &[&str] = &[
     "wss://nostr-pub.wellorder.net",
     "wss://nostr-01.yakihonne.com",
     "wss://nostr-02.yakihonne.com",
-    "wss://relay.satlantis.io",
 ];
 const DEFAULT_CALL_MOQ_URL: &str = "https://us-east.moq.logos.surf/anon";
 const DEFAULT_CALL_BROADCAST_PREFIX: &str = "pika/calls";
 
-const DEFAULT_BLOSSOM_SERVERS: &[&str] = &["https://blossom.yakihonne.com"];
+const DEFAULT_BLOSSOM_SERVERS: &[&str] = &[
+    "https://us-east.nostr.pikachat.org",
+    "https://eu.nostr.pikachat.org",
+];
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]

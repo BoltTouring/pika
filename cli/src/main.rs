@@ -352,6 +352,34 @@ fn print(v: serde_json::Value) {
     println!("{}", serde_json::to_string_pretty(&v).expect("json encode"));
 }
 
+/// Fetch recent group messages from the relay and feed them through
+/// `mdk.process_message` so the local MLS epoch is up-to-date before we
+/// attempt to create a new message.
+async fn ingest_group_backlog(
+    mdk: &mdk_util::PikaMdk,
+    client: &Client,
+    relay_urls: &[RelayUrl],
+    nostr_group_id_hex: &str,
+) -> anyhow::Result<()> {
+    let filter = Filter::new()
+        .kind(Kind::MlsGroupMessage)
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::H), nostr_group_id_hex)
+        .limit(200);
+
+    let events = client
+        .fetch_events_from(relay_urls.to_vec(), filter, Duration::from_secs(10))
+        .await
+        .context("fetch group backlog")?;
+
+    for ev in events.iter() {
+        // Errors are expected (own messages bouncing back, already-processed
+        // events, etc.) — the important thing is that commits get applied.
+        let _ = mdk.process_message(ev);
+    }
+
+    Ok(())
+}
+
 const MAX_CHAT_MEDIA_BYTES: usize = 32 * 1024 * 1024;
 
 fn is_imeta_tag(tag: &Tag) -> bool {
@@ -907,6 +935,12 @@ async fn cmd_send(
     };
 
     let ngid = hex::encode(resolved.group.nostr_group_id);
+
+    // ── Catch up: process any pending group messages from the relay ─────
+    // Without this, sending twice without running `listen` in between can
+    // leave the local MLS epoch stale, producing ciphertext that peers
+    // (who are on a newer epoch) cannot decrypt.
+    ingest_group_backlog(&mdk, &client, &relays, &ngid).await?;
 
     // ── Upload media (if any) ───────────────────────────────────────────
     let mut tags: Vec<Tag> = Vec::new();
