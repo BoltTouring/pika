@@ -454,7 +454,8 @@ impl DesktopApp {
                         group_name: self.group_name_input.clone(),
                     });
                 }
-                self.clear_all_overlays();
+                // Keep form open with spinner — sync_from_manager will close it
+                // when creating_chat transitions to false (matching iOS behavior).
                 self.optimistic_selected_chat_id = None;
             }
 
