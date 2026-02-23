@@ -550,7 +550,8 @@ struct ChatView: View {
         // Leave room above for the reaction bar (~48 height + 12 spacing)
         let reactionBarSpace: CGFloat = 60
         let idealTop = anchorLocalY - reactionBarSpace
-        let minTop = max(geo.safeAreaInsets.top + 8, 20)
+        // Allow content near the top edge — the overlay draws over the nav bar anyway
+        let minTop: CGFloat = 10
         let maxTop = geo.size.height * 0.5
         return min(max(idealTop, minTop), maxTop)
     }
