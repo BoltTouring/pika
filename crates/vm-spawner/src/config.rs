@@ -36,6 +36,9 @@ pub struct Config {
     pub default_ttl_seconds: u64,
     pub max_cpu: u32,
     pub max_memory_mb: u32,
+    pub prewarm_enabled: bool,
+    pub prewarm_flake_ref: String,
+    pub prewarm_dev_shell: String,
     pub microvm_cmd: String,
     pub systemctl_cmd: String,
     pub ip_cmd: String,
@@ -111,6 +114,11 @@ impl Config {
 
         let max_cpu = parse_u32_env("VM_MAX_CPU", 16);
         let max_memory_mb = parse_u32_env("VM_MAX_MEMORY_MB", 65536);
+        let prewarm_enabled = parse_bool_env("VM_PREWARM_ENABLED", true);
+        let prewarm_flake_ref = std::env::var("VM_PREWARM_FLAKE_REF")
+            .unwrap_or_else(|_| "github:sledtools/pika".into());
+        let prewarm_dev_shell =
+            std::env::var("VM_PREWARM_DEV_SHELL").unwrap_or_else(|_| "default".into());
 
         let microvm_cmd = std::env::var("VM_MICROVM_CMD")
             .unwrap_or_else(|_| "/run/current-system/sw/bin/microvm".into());
@@ -157,6 +165,9 @@ impl Config {
             default_ttl_seconds,
             max_cpu,
             max_memory_mb,
+            prewarm_enabled,
+            prewarm_flake_ref,
+            prewarm_dev_shell,
             microvm_cmd,
             systemctl_cmd,
             ip_cmd,
@@ -195,6 +206,17 @@ fn parse_u64_env(name: &str, default: u64) -> u64 {
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(default)
+}
+
+fn parse_bool_env(name: &str, default: bool) -> bool {
+    match std::env::var(name) {
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => true,
+            "0" | "false" | "no" | "off" => false,
+            _ => default,
+        },
+        Err(_) => default,
+    }
 }
 
 fn parse_runtime_artifacts_env(env_name: &str) -> anyhow::Result<Vec<RuntimeArtifactSpec>> {

@@ -10,6 +10,14 @@ trim() {
   printf '%s' "$s"
 }
 
+emit_publish_keypackage_cmd() {
+  if [[ -n "${PI_RELAYS_JSON:-}" ]] && jq -e 'type == "array" and length > 0' >/dev/null 2>&1 <<<"${PI_RELAYS_JSON}"; then
+    jq -cn --argjson relays "${PI_RELAYS_JSON}" '{"cmd":"publish_keypackage","relays":$relays}'
+  else
+    printf '{"cmd":"publish_keypackage"}\n'
+  fi
+}
+
 while IFS= read -r line; do
   [[ -z "${line}" ]] && continue
 
@@ -17,7 +25,7 @@ while IFS= read -r line; do
   case "$msg_type" in
     ready)
       my_pubkey="$(printf '%s' "$line" | jq -r '.pubkey // ""' 2>/dev/null || true)"
-      printf '{"cmd":"publish_keypackage"}\n'
+      emit_publish_keypackage_cmd
       ;;
     message_received)
       from_pubkey="$(printf '%s' "$line" | jq -r '.from_pubkey // ""' 2>/dev/null || true)"

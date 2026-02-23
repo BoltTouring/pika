@@ -1,10 +1,10 @@
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 const CREATE_VM_TIMEOUT: Duration = Duration::from_secs(20);
 const DELETE_VM_TIMEOUT: Duration = Duration::from_secs(10);
-const GET_VM_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone)]
 pub struct MicrovmSpawnerClient {
@@ -20,31 +20,20 @@ pub struct CreateVmRequest {
     pub memory_mb: Option<u32>,
     pub ttl_seconds: Option<u64>,
     pub spawn_variant: Option<String>,
+    pub guest_autostart: Option<GuestAutostartRequest>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct GuestAutostartRequest {
+    pub command: String,
+    pub env: BTreeMap<String, String>,
+    pub files: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct VmResponse {
     pub id: String,
     pub ip: String,
-    #[serde(default = "default_ssh_port")]
-    pub ssh_port: u16,
-    #[serde(default = "default_ssh_user")]
-    pub ssh_user: String,
-    pub ssh_private_key: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct VmStatus {
-    pub id: String,
-    pub ip: String,
-}
-
-fn default_ssh_port() -> u16 {
-    22
-}
-
-fn default_ssh_user() -> String {
-    "root".to_string()
 }
 
 impl MicrovmSpawnerClient {
@@ -96,25 +85,5 @@ impl MicrovmSpawnerClient {
             anyhow::bail!("failed to delete vm {vm_id}: {status} {text}");
         }
         Ok(())
-    }
-
-    pub async fn get_vm(&self, vm_id: &str) -> anyhow::Result<VmStatus> {
-        let url = format!("{}/vms/{vm_id}", self.base_url);
-        let resp = self
-            .client
-            .get(&url)
-            // Keep polling bounded so SSH wait deadlines are respected even if tunnel/network stalls.
-            .timeout(GET_VM_TIMEOUT)
-            .send()
-            .await
-            .with_context(|| format!("send get vm request for {vm_id}"))?;
-        let status = resp.status();
-        if !status.is_success() {
-            let text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("failed to get vm {vm_id}: {status} {text}");
-        }
-        resp.json()
-            .await
-            .with_context(|| format!("decode vm status response for {vm_id}"))
     }
 }

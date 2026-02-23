@@ -6,10 +6,7 @@ mod relay_util;
 
 use std::collections::HashMap;
 use std::io::Write;
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context};
@@ -20,7 +17,7 @@ use nostr_blossom::client::BlossomClient;
 use nostr_sdk::prelude::*;
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+use tokio::io::AsyncBufReadExt;
 
 // Same defaults as the Pika app (rust/src/core/config.rs).
 const DEFAULT_RELAY_URLS: &[&str] = &[
@@ -1258,7 +1255,6 @@ struct FlyProvider {
 
 struct MicrovmProvider {
     client: microvm_spawner::MicrovmSpawnerClient,
-    ssh_jump: Option<String>,
 }
 
 enum AgentProvider {
@@ -1291,7 +1287,7 @@ impl AgentProvider {
     fn keypackage_timeout(&self) -> Duration {
         match self {
             AgentProvider::Fly(_) => Duration::from_secs(120),
-            AgentProvider::Microvm(_) => Duration::from_secs(600),
+            AgentProvider::Microvm(_) => Duration::from_secs(180),
         }
     }
 
@@ -1305,7 +1301,14 @@ impl AgentProvider {
     fn keypackage_retry_interval(&self) -> Duration {
         match self {
             AgentProvider::Fly(_) => Duration::from_secs(3),
-            AgentProvider::Microvm(_) => Duration::from_secs(1),
+            AgentProvider::Microvm(_) => Duration::from_millis(250),
+        }
+    }
+
+    fn keypackage_primary_only_window(&self) -> Option<Duration> {
+        match self {
+            AgentProvider::Fly(_) => None,
+            AgentProvider::Microvm(_) => Some(Duration::from_secs(20)),
         }
     }
 }
@@ -1366,6 +1369,7 @@ impl MicrovmProvider {
             memory_mb: Some(args.memory_mb),
             ttl_seconds: Some(args.ttl_seconds),
             spawn_variant: Some(args.spawn_variant.as_str().to_string()),
+            guest_autostart: Some(build_microvm_guest_autostart(spawn)),
         };
 
         eprint!("Spawning microVM...");
@@ -1382,47 +1386,10 @@ impl MicrovmProvider {
             })?;
         eprintln!(" done ({} @ {})", vm.id, vm.ip);
 
-        let key_path = write_temp_private_key(&vm.ssh_private_key)?;
-        let mut ssh_ip = vm.ip.clone();
-        let start_result = async {
-            eprint!("Waiting for SSH...");
-            std::io::stderr().flush().ok();
-            ssh_ip = wait_for_ssh_with_ip_refresh(
-                &self.client,
-                &vm.id,
-                &vm.ip,
-                &vm.ssh_user,
-                vm.ssh_port,
-                &key_path,
-                self.ssh_jump.as_deref(),
-                Duration::from_secs(60),
-            )
-            .await?;
-            eprintln!(" done");
-
-            eprint!("Starting guest agent process...");
-            std::io::stderr().flush().ok();
-            start_guest_agent_process(
-                &ssh_ip,
-                &vm.ssh_user,
-                vm.ssh_port,
-                &key_path,
-                self.ssh_jump.as_deref(),
-                spawn,
-            )
-            .await?;
-            eprintln!(" done");
-            Ok::<(), anyhow::Error>(())
-        }
-        .await;
-
-        let _ = std::fs::remove_file(&key_path);
-        start_result?;
-
         Ok(AgentRuntimeHandle::Microvm {
             spawner_url: self.client.base_url().to_string(),
             vm_id: vm.id,
-            ip: ssh_ip,
+            ip: vm.ip,
         })
     }
 }
@@ -1431,158 +1398,9 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
-fn write_temp_private_key(private_key: &str) -> anyhow::Result<PathBuf> {
-    let path = std::env::temp_dir().join(format!("pika-microvm-{}.key", rand::random::<u64>()));
-    std::fs::write(&path, private_key)
-        .with_context(|| format!("write temporary ssh key {}", path.display()))?;
-    #[cfg(unix)]
-    {
-        let permissions = std::fs::Permissions::from_mode(0o600);
-        std::fs::set_permissions(&path, permissions)
-            .with_context(|| format!("chmod 600 {}", path.display()))?;
-    }
-    Ok(path)
-}
-
-async fn wait_for_ssh_with_ip_refresh(
-    client: &microvm_spawner::MicrovmSpawnerClient,
-    vm_id: &str,
-    initial_ip: &str,
-    user: &str,
-    port: u16,
-    key_path: &Path,
-    jump_host: Option<&str>,
-    timeout: Duration,
-) -> anyhow::Result<String> {
-    let deadline = tokio::time::Instant::now() + timeout;
-    let mut current_ip = initial_ip.to_string();
-    loop {
-        if check_ssh_ready(&current_ip, user, port, key_path, jump_host).await? {
-            return Ok(current_ip);
-        }
-        let now = tokio::time::Instant::now();
-        if now >= deadline {
-            anyhow::bail!("timed out waiting for SSH on {user}@{current_ip}:{port}");
-        }
-        let remaining = deadline.saturating_duration_since(now);
-        let refresh_budget = remaining.min(Duration::from_millis(500));
-
-        if refresh_budget > Duration::ZERO {
-            if let Ok(Ok(vm)) = tokio::time::timeout(refresh_budget, client.get_vm(vm_id)).await {
-                if vm.id == vm_id && vm.ip != current_ip {
-                    eprint!(" (ip update {} -> {})", current_ip, vm.ip);
-                    std::io::stderr().flush().ok();
-                    current_ip = vm.ip;
-                }
-            }
-        }
-
-        let now = tokio::time::Instant::now();
-        if now >= deadline {
-            anyhow::bail!("timed out waiting for SSH on {user}@{current_ip}:{port}");
-        }
-        let sleep_for = deadline
-            .saturating_duration_since(now)
-            .min(Duration::from_millis(250));
-        tokio::time::sleep(sleep_for).await;
-    }
-}
-
-async fn check_ssh_ready(
-    ip: &str,
-    user: &str,
-    port: u16,
-    key_path: &Path,
-    jump_host: Option<&str>,
-) -> anyhow::Result<bool> {
-    let mut command = tokio::process::Command::new("ssh");
-    command
-        .arg("-i")
-        .arg(key_path)
-        .arg("-o")
-        .arg("BatchMode=yes")
-        .arg("-o")
-        .arg("StrictHostKeyChecking=no")
-        .arg("-o")
-        .arg("UserKnownHostsFile=/dev/null")
-        .arg("-o")
-        .arg("ConnectTimeout=2");
-    if let Some(jump_host) = jump_host {
-        command.arg("-o").arg(format!(
-            "ProxyCommand=ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null {jump_host} -W %h:%p"
-        ));
-    }
-    let status = command
-        .arg("-p")
-        .arg(port.to_string())
-        .arg(format!("{user}@{ip}"))
-        .arg("true")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await
-        .context("spawn ssh readiness check")?;
-    Ok(status.success())
-}
-
-async fn run_ssh_script(
-    ip: &str,
-    user: &str,
-    port: u16,
-    key_path: &Path,
-    jump_host: Option<&str>,
-    script: &str,
-) -> anyhow::Result<()> {
-    let mut command = tokio::process::Command::new("ssh");
-    command
-        .arg("-i")
-        .arg(key_path)
-        .arg("-o")
-        .arg("BatchMode=yes")
-        .arg("-o")
-        .arg("StrictHostKeyChecking=no")
-        .arg("-o")
-        .arg("UserKnownHostsFile=/dev/null")
-        .arg("-o")
-        .arg("ConnectTimeout=8");
-    if let Some(jump_host) = jump_host {
-        command.arg("-o").arg(format!(
-            "ProxyCommand=ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null {jump_host} -W %h:%p"
-        ));
-    }
-    let mut child = command
-        .arg("-p")
-        .arg(port.to_string())
-        .arg(format!("{user}@{ip}"))
-        .arg("bash -seu")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .context("spawn ssh command")?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(script.as_bytes())
-            .await
-            .context("write ssh script to stdin")?;
-    }
-
-    let status = child.wait().await.context("wait for ssh command")?;
-    if !status.success() {
-        anyhow::bail!("remote command failed with status {status}");
-    }
-    Ok(())
-}
-
-async fn start_guest_agent_process(
-    ip: &str,
-    user: &str,
-    port: u16,
-    key_path: &Path,
-    jump_host: Option<&str>,
+fn build_microvm_guest_autostart(
     spawn: &AgentSpawnConfig,
-) -> anyhow::Result<()> {
+) -> microvm_spawner::GuestAutostartRequest {
     let relay_flags = spawn
         .relays
         .iter()
@@ -1590,31 +1408,17 @@ async fn start_guest_agent_process(
         .collect::<Vec<_>>()
         .join(" ");
 
-    let mut exports = vec![
-        format!(
-            "export NOSTR_SECRET_KEY={}",
-            shell_quote(&spawn.bot_secret_hex)
-        ),
-        format!(
-            "export ANTHROPIC_API_KEY={}",
-            shell_quote(&spawn.anthropic_key)
-        ),
-        "export CARGO_TARGET_DIR=/workspace/pika-agent/target".to_string(),
-    ];
-    if let Some(openai) = &spawn.openai_key {
-        exports.push(format!("export OPENAI_API_KEY={}", shell_quote(openai)));
-    }
-    if let Some(model) = &spawn.pi_model {
-        exports.push(format!("export PI_MODEL={}", shell_quote(model)));
-    }
-
     let run_script = format!(
         r#"#!/usr/bin/env bash
 set -euo pipefail
-{}
 if [ -f /run/agent-meta/env ]; then
   set -a
   . /run/agent-meta/env
+  set +a
+fi
+if [ -f /run/agent-meta/autostart.env ]; then
+  set -a
+  . /run/agent-meta/autostart.env
   set +a
 fi
 STATE_DIR=/workspace/pika-agent/state
@@ -1667,49 +1471,46 @@ fi
 cd "$src"
 nix develop "$src#$PIKA_DEV_SHELL" -c cargo run -q -p marmotd -- init --nsec "${{NOSTR_SECRET_KEY}}" --state-dir "$STATE_DIR" >/dev/null
 exec nix develop "$src#$PIKA_DEV_SHELL" -c cargo run -q -p marmotd -- daemon {} --state-dir "$STATE_DIR" --auto-accept-welcomes --exec "$BRIDGE_CMD"
-"#,
-        exports.join("\n"),
-        relay_flags,
-        relay_flags
+    "#,
+        relay_flags, relay_flags
     );
+    let relays_json = serde_json::to_string(&spawn.relays).unwrap_or_else(|_| "[]".to_string());
 
-    let remote_script = format!(
-        r#"AGENT_DIR=/workspace/pika-agent
-mkdir -p "$AGENT_DIR"
-cat > "$AGENT_DIR/pi-bridge.py" <<'PY'
-{PI_BRIDGE_PY}
-PY
-chmod 0755 "$AGENT_DIR/pi-bridge.py"
-
-cat > "$AGENT_DIR/pi-bridge.sh" <<'SH'
-{PI_BRIDGE_SH}
-SH
-chmod 0755 "$AGENT_DIR/pi-bridge.sh"
-
-cat > "$AGENT_DIR/run-agent.sh" <<'SH'
-{run_script}
-SH
-chmod 0755 "$AGENT_DIR/run-agent.sh"
-
-nohup bash "$AGENT_DIR/run-agent.sh" > "$AGENT_DIR/agent.log" 2>&1 < /dev/null &
-echo $! > "$AGENT_DIR/agent.pid"
-started=0
-for _ in $(seq 1 10); do
-  if kill -0 "$(cat "$AGENT_DIR/agent.pid")" >/dev/null 2>&1; then
-    started=1
-    break
-  fi
-  sleep 0.1
-done
-if [ "$started" -ne 1 ]; then
-  echo "agent process failed to start" >&2
-  tail -n 80 "$AGENT_DIR/agent.log" >&2 || true
-  exit 1
-fi
-"#
+    let mut env = std::collections::BTreeMap::new();
+    env.insert("NOSTR_SECRET_KEY".to_string(), spawn.bot_secret_hex.clone());
+    env.insert("ANTHROPIC_API_KEY".to_string(), spawn.anthropic_key.clone());
+    env.insert(
+        "CARGO_TARGET_DIR".to_string(),
+        "/workspace/pika-agent/target".to_string(),
     );
+    env.insert("PI_RELAYS_JSON".to_string(), relays_json);
+    env.insert(
+        "MARMOTD_SKIP_RELAY_READY_CHECK".to_string(),
+        "1".to_string(),
+    );
+    if let Some(openai) = &spawn.openai_key {
+        env.insert("OPENAI_API_KEY".to_string(), openai.clone());
+    }
+    if let Some(model) = &spawn.pi_model {
+        env.insert("PI_MODEL".to_string(), model.clone());
+    }
 
-    run_ssh_script(ip, user, port, key_path, jump_host, &remote_script).await
+    let mut files = std::collections::BTreeMap::new();
+    files.insert(
+        "workspace/pika-agent/pi-bridge.py".to_string(),
+        PI_BRIDGE_PY.to_string(),
+    );
+    files.insert(
+        "workspace/pika-agent/pi-bridge.sh".to_string(),
+        PI_BRIDGE_SH.to_string(),
+    );
+    files.insert("workspace/pika-agent/run-agent.sh".to_string(), run_script);
+
+    microvm_spawner::GuestAutostartRequest {
+        command: "bash /workspace/pika-agent/run-agent.sh".to_string(),
+        env,
+        files,
+    }
 }
 
 async fn cmd_agent_new(cli: &Cli, args: &AgentNewArgs) -> anyhow::Result<()> {
@@ -1727,18 +1528,6 @@ async fn cmd_agent_new(cli: &Cli, args: &AgentNewArgs) -> anyhow::Result<()> {
         }),
         AgentProviderArg::Microvm => AgentProvider::Microvm(MicrovmProvider {
             client: microvm_spawner::MicrovmSpawnerClient::new(args.spawner_url.clone()),
-            ssh_jump: std::env::var("PIKA_MICROVM_SSH_JUMP")
-                .ok()
-                .filter(|v| !v.trim().is_empty())
-                .or_else(|| {
-                    if args.spawner_url.contains("127.0.0.1")
-                        || args.spawner_url.contains("localhost")
-                    {
-                        Some("pika-build".to_string())
-                    } else {
-                        None
-                    }
-                }),
         }),
     };
 
@@ -1767,19 +1556,33 @@ async fn cmd_agent_new(cli: &Cli, args: &AgentNewArgs) -> anyhow::Result<()> {
     let keypackage_timeout = provider.keypackage_timeout();
     let keypackage_fetch_timeout = provider.keypackage_fetch_timeout();
     let keypackage_retry_interval = provider.keypackage_retry_interval();
+    let keypackage_primary_only_window = provider.keypackage_primary_only_window();
 
     let session_result = async {
         let client = client_all(cli, &keys).await?;
         let relays = relay_util::parse_relay_urls(&relays)?;
+        let mut primary_relay_only = Vec::new();
+        if let Some(primary) = relays.first() {
+            primary_relay_only.push(primary.clone());
+        }
 
         eprint!("Waiting for bot to publish key package");
         std::io::stderr().flush().ok();
         let start = tokio::time::Instant::now();
         let bot_kp = loop {
+            let fetch_relays: &[RelayUrl] = if let Some(window) = keypackage_primary_only_window {
+                if start.elapsed() < window && !primary_relay_only.is_empty() {
+                    &primary_relay_only
+                } else {
+                    &relays
+                }
+            } else {
+                &relays
+            };
             match relay_util::fetch_latest_key_package(
                 &client,
                 &bot_pubkey,
-                &relays,
+                fetch_relays,
                 keypackage_fetch_timeout,
             )
             .await

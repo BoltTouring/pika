@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::net::Ipv4Addr;
 use std::os::unix::fs::symlink;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -16,7 +17,8 @@ use uuid::Uuid;
 
 use crate::config::{from_u32, to_u32, Config, RuntimeArtifactSpec};
 use crate::models::{
-    CapacityResponse, CreateVmRequest, PersistedVm, SessionRecord, SessionRegistry, VmResponse,
+    CapacityResponse, CreateVmRequest, GuestAutostartRequest, PersistedVm, SessionRecord,
+    SessionRegistry, VmResponse,
 };
 
 #[derive(Clone)]
@@ -102,6 +104,30 @@ impl VmManager {
         Ok(manager)
     }
 
+    pub async fn prewarm_defaults_if_enabled(&self) -> anyhow::Result<()> {
+        if !self.cfg.prewarm_enabled {
+            return Ok(());
+        }
+
+        info!(
+            flake_ref = %self.cfg.prewarm_flake_ref,
+            dev_shell = %self.cfg.prewarm_dev_shell,
+            cpu = self.cfg.default_cpu,
+            memory_mb = self.cfg.default_memory_mb,
+            "starting vm-spawner prewarm"
+        );
+
+        self.ensure_runtime_artifacts().await?;
+        self.ensure_devshell_warmed(&self.cfg.prewarm_flake_ref, &self.cfg.prewarm_dev_shell)
+            .await?;
+        let _ = self
+            .ensure_prebuilt_runner(self.cfg.default_cpu, self.cfg.default_memory_mb)
+            .await?;
+
+        info!("vm-spawner prewarm complete");
+        Ok(())
+    }
+
     pub async fn list(&self) -> Vec<PersistedVm> {
         let guard = self.inner.lock().await;
         let mut values: Vec<_> = guard.vms.values().cloned().collect();
@@ -145,6 +171,7 @@ impl VmManager {
     }
 
     pub async fn create(&self, req: CreateVmRequest) -> anyhow::Result<VmResponse> {
+        let guest_autostart = req.guest_autostart.clone();
         let flake_ref = sanitize_flake_ref(
             req.flake_ref
                 .unwrap_or_else(|| "github:sledtools/pika".to_string()),
@@ -282,6 +309,7 @@ impl VmManager {
                     run_command(
                         Command::new(&self.cfg.systemctl_cmd)
                             .arg("start")
+                            .arg("--no-block")
                             .arg(format!("microvm@{id}.service")),
                         "start microvm service",
                     )
@@ -328,6 +356,7 @@ impl VmManager {
                         variant.workspace_mode(),
                         &self.cfg.workspace_template_path,
                         Some(&marmotd_bin),
+                        guest_autostart.as_ref(),
                     )?;
                     timings.insert("metadata_write_ms".into(), to_ms(phase_start.elapsed()));
                     phase_start = Instant::now();
@@ -345,14 +374,9 @@ impl VmManager {
                     run_command(
                         Command::new(&self.cfg.systemctl_cmd)
                             .arg("start")
+                            .arg("--no-block")
                             .arg(format!("microvm@{id}.service")),
                         "start microvm service",
-                    )
-                    .await?;
-                    wait_for_unit_active(
-                        &self.cfg.systemctl_cmd,
-                        &format!("microvm@{id}.service"),
-                        Duration::from_secs(20),
                     )
                     .await?;
                     timings.insert("service_start_ms".into(), to_ms(phase_start.elapsed()));
@@ -881,6 +905,7 @@ fn write_runtime_metadata(
     workspace_mode: &str,
     workspace_template_path: &Path,
     marmotd_bin: Option<&Path>,
+    guest_autostart: Option<&GuestAutostartRequest>,
 ) -> anyhow::Result<()> {
     let metadata_dir = vm_state_dir.join("metadata");
     fs::create_dir_all(&metadata_dir)
@@ -943,7 +968,104 @@ fn write_runtime_metadata(
         )
     })?;
 
+    if let Some(autostart) = guest_autostart {
+        write_guest_autostart_metadata(&metadata_dir, autostart)?;
+    }
+
     Ok(())
+}
+
+fn write_guest_autostart_metadata(
+    metadata_dir: &Path,
+    autostart: &GuestAutostartRequest,
+) -> anyhow::Result<()> {
+    let command = autostart.command.trim();
+    if command.is_empty() {
+        anyhow::bail!("guest_autostart.command must not be empty");
+    }
+
+    fs::write(
+        metadata_dir.join("autostart.command"),
+        format!("{command}\n"),
+    )
+    .with_context(|| format!("write {}", metadata_dir.join("autostart.command").display()))?;
+
+    if !autostart.env.is_empty() {
+        let mut env_text = String::new();
+        for (key, value) in &autostart.env {
+            if !is_valid_env_key(key) {
+                anyhow::bail!("guest_autostart.env has invalid key `{key}`");
+            }
+            env_text.push_str(&format!("{}={}\n", key, shell_quote(value)));
+        }
+        fs::write(metadata_dir.join("autostart.env"), env_text)
+            .with_context(|| format!("write {}", metadata_dir.join("autostart.env").display()))?;
+    }
+
+    if !autostart.files.is_empty() {
+        if autostart.files.len() > 32 {
+            anyhow::bail!("guest_autostart.files has too many entries (max 32)");
+        }
+        let files_dir = metadata_dir.join("autostart.files");
+        fs::create_dir_all(&files_dir)
+            .with_context(|| format!("create {}", files_dir.display()))?;
+
+        for (rel_path, content) in &autostart.files {
+            let safe_rel = sanitize_autostart_rel_path(rel_path)?;
+            let dst = files_dir.join(&safe_rel);
+            if let Some(parent) = dst.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("create parent {}", parent.display()))?;
+            }
+            fs::write(&dst, content).with_context(|| format!("write {}", dst.display()))?;
+            if rel_path.ends_with(".sh") || rel_path.ends_with(".py") {
+                let mut perms = fs::metadata(&dst)
+                    .with_context(|| format!("stat {}", dst.display()))?
+                    .permissions();
+                perms.set_mode(0o755);
+                fs::set_permissions(&dst, perms)
+                    .with_context(|| format!("chmod 755 {}", dst.display()))?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn is_valid_env_key(key: &str) -> bool {
+    let mut chars = key.chars();
+    match chars.next() {
+        Some(c) if c == '_' || c.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+fn sanitize_autostart_rel_path(value: &str) -> anyhow::Result<PathBuf> {
+    let rel = Path::new(value);
+    if rel.as_os_str().is_empty() {
+        anyhow::bail!("guest_autostart file path must not be empty");
+    }
+    if rel.is_absolute() {
+        anyhow::bail!("guest_autostart file path must be relative: {value}");
+    }
+
+    let mut out = PathBuf::new();
+    for component in rel.components() {
+        match component {
+            std::path::Component::Normal(part) => out.push(part),
+            _ => anyhow::bail!("guest_autostart file path contains invalid component: {value}"),
+        }
+    }
+
+    if !out.starts_with("workspace") {
+        anyhow::bail!(
+            "guest_autostart file path must be under workspace/: {}",
+            out.display()
+        );
+    }
+
+    Ok(out)
 }
 
 fn symlink_force(target: &Path, link: &Path) -> anyhow::Result<()> {
@@ -1108,6 +1230,54 @@ fn write_prebuilt_base_flake(
               ip addr add "$PIKA_VM_IP/24" dev "$dev"
               ip route replace default via "$PIKA_GATEWAY_IP" dev "$dev"
               printf 'nameserver %s\n' "$PIKA_DNS_IP" > /etc/resolv.conf
+            '';
+          }};
+
+          systemd.services.agent-autostart = {{
+            description = "Launch guest autostart command from vm metadata";
+            wantedBy = [ "multi-user.target" ];
+            after = [ "vm-network-setup.service" "agent-bootstrap.service" "local-fs.target" ];
+            requires = [ "vm-network-setup.service" "agent-bootstrap.service" ];
+            serviceConfig = {{
+              Type = "oneshot";
+              RemainAfterExit = true;
+            }};
+            path = with pkgs; [ bash coreutils findutils gnused ];
+            script = ''
+              set -euo pipefail
+
+              if [ ! -f /run/agent-meta/autostart.command ]; then
+                exit 0
+              fi
+
+              if [ -d /run/agent-meta/autostart.files ]; then
+                while IFS= read -r src; do
+                  rel="$(sed 's|^/run/agent-meta/autostart.files/||' <<< "$src")"
+                  dst="/$rel"
+                  mkdir -p "$(dirname "$dst")"
+                  cp "$src" "$dst"
+                done < <(find /run/agent-meta/autostart.files -type f)
+              fi
+
+              if [ -f /etc/agent-env ]; then
+                set -a
+                . /etc/agent-env
+                set +a
+              fi
+              if [ -f /run/agent-meta/autostart.env ]; then
+                set -a
+                . /run/agent-meta/autostart.env
+                set +a
+              fi
+
+              cmd="$(cat /run/agent-meta/autostart.command)"
+              if [ -z "$cmd" ]; then
+                exit 0
+              fi
+
+              mkdir -p /workspace/pika-agent
+              nohup bash -lc "$cmd" >/workspace/pika-agent/agent.log 2>&1 < /dev/null &
+              echo $! >/workspace/pika-agent/agent.pid
             '';
           }};
 

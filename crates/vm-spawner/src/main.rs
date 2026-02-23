@@ -27,6 +27,13 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::from_env()?;
     let manager = Arc::new(VmManager::new(config.clone()).await?);
 
+    let prewarm_manager = manager.clone();
+    tokio::spawn(async move {
+        if let Err(err) = prewarm_manager.prewarm_defaults_if_enabled().await {
+            error!(error = %err, "vm-spawner prewarm failed");
+        }
+    });
+
     let reaper_manager = manager.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(10));

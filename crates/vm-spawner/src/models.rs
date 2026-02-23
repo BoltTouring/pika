@@ -12,6 +12,16 @@ pub struct CreateVmRequest {
     pub memory_mb: Option<u32>,
     pub ttl_seconds: Option<u64>,
     pub spawn_variant: Option<String>,
+    pub guest_autostart: Option<GuestAutostartRequest>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GuestAutostartRequest {
+    pub command: String,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub files: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
