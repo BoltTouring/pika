@@ -50,6 +50,8 @@ Notes:
 
 - Long-term, one image is enough once it contains the dual-mode bridge.
 - During migration, a separate app/image is useful to avoid mixing old PTY-only deployments with RPC testing.
+- `agent-fly-moq` ignores any pinned `FLY_BOT_IMAGE` by default and auto-resolves the latest app image.
+- To force a pinned image, set `PIKA_AGENT_USE_PINNED_IMAGE=1`.
 
 ## When you need to deploy a new bot image
 
@@ -65,9 +67,9 @@ Suggested deploy flow:
 fly deploy -c fly.pika-bot.toml
 ```
 
-Then verify new machines are using the updated image (or set `FLY_BOT_IMAGE` explicitly in your shell before running `just agent-fly-moq`).
-
-`just agent-fly-moq` now respects an explicitly set `FLY_BOT_IMAGE` and will not auto-override it.
+Then verify new machines are using the updated image.
+If you want to force a specific image, set:
+`PIKA_AGENT_USE_PINNED_IMAGE=1 FLY_BOT_IMAGE=registry.fly.io/pika-bot:deployment-<id>`.
 
 If you only changed local CLI/UI code (`cli/src/main.rs`, `tools/agent-rpc-parity-ui/*`), no bot image rebuild is required.
 
