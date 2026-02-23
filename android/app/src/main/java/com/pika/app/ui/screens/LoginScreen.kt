@@ -129,6 +129,13 @@ fun LoginScreen(manager: AppManager, padding: PaddingValues) {
             singleLine = true,
             enabled = !anyBusy,
             label = { Text("bunker URI") },
+            trailingIcon = {
+                if (bunkerUri.isNotEmpty()) {
+                    IconButton(onClick = { bunkerUri = "" }) {
+                        Icon(Icons.Default.Clear, contentDescription = "Clear")
+                    }
+                }
+            },
             modifier = Modifier.fillMaxWidth().testTag(TestTags.LOGIN_BUNKER_URI),
         )
 
