@@ -56,6 +56,30 @@ const DEFAULT_AGENT_MOQ_URLS: &[&str] = &[
     "https://eu.moq.pikachat.org/anon",
 ];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentUiMode {
+    Pty,
+    Rpc,
+}
+
+impl AgentUiMode {
+    fn from_env() -> anyhow::Result<Self> {
+        let raw = std::env::var("PIKA_AGENT_UI_MODE").unwrap_or_else(|_| "pty".to_string());
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "" | "pty" => Ok(Self::Pty),
+            "rpc" => Ok(Self::Rpc),
+            other => anyhow::bail!("invalid PIKA_AGENT_UI_MODE={other}; expected one of: pty, rpc"),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Pty => "pty",
+            Self::Rpc => "rpc",
+        }
+    }
+}
+
 #[derive(Debug, Parser)]
 #[command(name = "pikachat")]
 #[command(about = "Pikachat — encrypted messaging over Nostr + MLS")]
@@ -1206,6 +1230,7 @@ async fn cmd_download_media(
 }
 
 async fn cmd_agent_new(cli: &Cli, name: Option<&str>) -> anyhow::Result<()> {
+    let ui_mode = AgentUiMode::from_env()?;
     let fly = fly_machines::FlyClient::from_env()?;
     let anthropic_key =
         std::env::var("ANTHROPIC_API_KEY").context("ANTHROPIC_API_KEY must be set")?;
@@ -1233,6 +1258,10 @@ async fn cmd_agent_new(cli: &Cli, name: Option<&str>) -> anyhow::Result<()> {
     env.insert("STATE_DIR".to_string(), "/app/state".to_string());
     env.insert("NOSTR_SECRET_KEY".to_string(), bot_secret_hex);
     env.insert("ANTHROPIC_API_KEY".to_string(), anthropic_key);
+    env.insert(
+        "PI_BRIDGE_CALL_MODE".to_string(),
+        ui_mode.as_str().to_string(),
+    );
     for key in ["PI_BRIDGE_REPLAY_FILE", "PI_BRIDGE_REPLAY_SPEED"] {
         if let Ok(value) = std::env::var(key) {
             let trimmed = value.trim();
@@ -1307,15 +1336,26 @@ async fn cmd_agent_new(cli: &Cli, name: Option<&str>) -> anyhow::Result<()> {
 
     let relay_urls = resolve_relays(cli);
     let moq_urls = resolve_agent_moq_urls();
-    launch_agent_pty_client(
-        &cli.state_dir,
-        &relay_urls,
-        &moq_urls,
-        &nostr_group_id_hex,
-        &bot_pubkey.to_hex(),
-        &machine.id,
-        fly.app_name(),
-    )
+    match ui_mode {
+        AgentUiMode::Pty => launch_agent_pty_client(
+            &cli.state_dir,
+            &relay_urls,
+            &moq_urls,
+            &nostr_group_id_hex,
+            &bot_pubkey.to_hex(),
+            &machine.id,
+            fly.app_name(),
+        ),
+        AgentUiMode::Rpc => launch_agent_rpc_parity_ui(
+            &cli.state_dir,
+            &relay_urls,
+            &moq_urls,
+            &nostr_group_id_hex,
+            &bot_pubkey.to_hex(),
+            &machine.id,
+            fly.app_name(),
+        ),
+    }
 }
 
 fn resolve_agent_moq_urls() -> Vec<String> {
@@ -1410,6 +1450,55 @@ fn launch_agent_pty_client(
         let status = cmd.status().context("launch agent tui")?;
         if !status.success() {
             anyhow::bail!("agent TUI exited with status {status}");
+        }
+        Ok(())
+    }
+}
+
+fn launch_agent_rpc_parity_ui(
+    state_dir: &Path,
+    relay_urls: &[String],
+    moq_urls: &[String],
+    nostr_group_id_hex: &str,
+    bot_pubkey_hex: &str,
+    machine_id: &str,
+    fly_app_name: &str,
+) -> anyhow::Result<()> {
+    let script_path = PathBuf::from("tools/agent-rpc-parity-ui/agent-rpc-parity-ui.mjs");
+    if !script_path.exists() {
+        anyhow::bail!("missing {} (run from repo root)", script_path.display());
+    }
+    let marmotd_bin = resolve_marmotd_bin()?;
+
+    eprintln!();
+    eprintln!("Launching RPC parity agent session...");
+    eprintln!("Machine {machine_id} is running in app {fly_app_name}.");
+    eprintln!("Stop with: fly machine stop {machine_id} -a {fly_app_name}");
+    eprintln!();
+
+    let mut cmd = std::process::Command::new("node");
+    cmd.arg(&script_path);
+    cmd.env("PIKA_AGENT_MARMOTD_BIN", marmotd_bin);
+    cmd.env("PIKA_AGENT_STATE_DIR", state_dir);
+    cmd.env("PIKA_AGENT_GROUP_ID", nostr_group_id_hex);
+    cmd.env("PIKA_AGENT_BOT_PUBKEY", bot_pubkey_hex);
+    cmd.env("PIKA_AGENT_MACHINE_ID", machine_id);
+    cmd.env("PIKA_AGENT_FLY_APP_NAME", fly_app_name);
+    cmd.env("PIKA_AGENT_RELAYS_JSON", serde_json::to_string(relay_urls)?);
+    cmd.env("PIKA_AGENT_MOQ_URLS_JSON", serde_json::to_string(moq_urls)?);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let err = cmd.exec();
+        anyhow::bail!("failed to exec node {}: {err}", script_path.display());
+    }
+
+    #[cfg(not(unix))]
+    {
+        let status = cmd.status().context("launch rpc parity ui")?;
+        if !status.success() {
+            anyhow::bail!("rpc parity UI exited with status {status}");
         }
         Ok(())
     }

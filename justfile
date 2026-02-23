@@ -729,13 +729,24 @@ agent RELAY_EU="wss://eu.nostr.pikachat.org" RELAY_US="wss://us-east.nostr.pikac
     source .env; \
     set +a; \
     app_name="${FLY_BOT_APP_NAME:-pika-bot}"; \
-    resolved_image="$(fly machines list -a "$app_name" --json 2>/dev/null | python3 -c 'import json,sys; m=json.load(sys.stdin); n=[x for x in m if not (x.get("name") or "").startswith("agent-")]; c=sorted(n or m, key=lambda x:x.get("updated_at","")); cfg=(c[-1].get("config") if c else {}) or {}; sys.stdout.write(cfg.get("image") or "")')"; \
-    if [ -n "$resolved_image" ]; then \
-      export FLY_BOT_IMAGE="$resolved_image"; \
+    if [ -z "${FLY_BOT_IMAGE:-}" ]; then \
+      resolved_image="$(fly machines list -a "$app_name" --json 2>/dev/null | python3 -c 'import json,sys; m=json.load(sys.stdin); n=[x for x in m if not (x.get("name") or "").startswith("agent-")]; c=sorted(n or m, key=lambda x:x.get("updated_at","")); cfg=(c[-1].get("config") if c else {}) or {}; sys.stdout.write(cfg.get("image") or "")')"; \
+      if [ -n "$resolved_image" ]; then \
+        export FLY_BOT_IMAGE="$resolved_image"; \
+      fi; \
     fi; \
     export PIKA_AGENT_MARMOTD_BIN="$PWD/target/debug/marmotd"; \
     export PIKA_AGENT_MOQ_URLS="{{ MOQ_US }},{{ MOQ_EU }}"; \
     cargo run -p pika-cli -- --relay {{ RELAY_EU }} --relay {{ RELAY_US }} agent new
+
+# Run `pika-cli agent new` in RPC parity mode (quiet marmotd logs for clean TUI).
+agent-fly-rpc RELAY_EU="wss://eu.nostr.pikachat.org" RELAY_US="wss://us-east.nostr.pikachat.org" MOQ_US="https://us-east.moq.pikachat.org/anon" MOQ_EU="https://eu.moq.pikachat.org/anon":
+    set -euo pipefail; \
+    export PIKA_AGENT_UI_MODE=rpc; \
+    export PIKA_AGENT_MARMOTD_STDERR=quiet; \
+    if [ -n "${FLY_BOT_APP_NAME_RPC:-}" ]; then export FLY_BOT_APP_NAME="$FLY_BOT_APP_NAME_RPC"; fi; \
+    if [ -n "${FLY_BOT_IMAGE_RPC:-}" ]; then export FLY_BOT_IMAGE="$FLY_BOT_IMAGE_RPC"; fi; \
+    just agent {{ RELAY_EU }} {{ RELAY_US }} {{ MOQ_US }} {{ MOQ_EU }}
 
 # Deterministic PTY replay smoke test over Fly + MoQ (non-interactive).
 agent-replay-test RELAY_EU="wss://eu.nostr.pikachat.org" RELAY_US="wss://us-east.nostr.pikachat.org" MOQ_US="https://us-east.moq.pikachat.org/anon" MOQ_EU="https://eu.moq.pikachat.org/anon":
