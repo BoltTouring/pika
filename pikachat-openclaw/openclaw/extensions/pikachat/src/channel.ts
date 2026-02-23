@@ -509,6 +509,19 @@ function looksLikeGroupIdHex(input: string): boolean {
   return /^[0-9a-f]{64}$/i.test(input.trim());
 }
 
+function resolveOutboundTarget(to: string, accountId?: string | null): { handle: PikachatSidecarHandle; groupId: string } {
+  const aid = accountId ?? DEFAULT_ACCOUNT_ID;
+  const handle = activeSidecars.get(aid);
+  if (!handle) {
+    throw new Error(`pikachat sidecar not running for account ${aid}`);
+  }
+  const groupId = normalizeGroupId(to);
+  if (!looksLikeGroupIdHex(groupId)) {
+    throw new Error(`invalid pikachat group id: ${to}`);
+  }
+  return { handle, groupId };
+}
+
 function normalizeGroupId(input: string): string {
   const trimmed = input.trim();
   if (!trimmed) return trimmed;
@@ -592,7 +605,7 @@ export const pikachatPlugin: ChannelPlugin<ResolvedPikachatAccount> = {
   },
   capabilities: {
     chatTypes: ["dm", "group"],
-    media: false,
+    media: true,
     nativeCommands: false,
   },
   reload: { configPrefixes: ["channels.pikachat", "plugins.entries.pikachat"] },
@@ -653,20 +666,45 @@ export const pikachatPlugin: ChannelPlugin<ResolvedPikachatAccount> = {
     deliveryMode: "direct",
     textChunkLimit: 4000,
     sendText: async ({ to, text, accountId }) => {
-      const aid = accountId ?? DEFAULT_ACCOUNT_ID;
-      const handle = activeSidecars.get(aid);
-      if (!handle) {
-        throw new Error(`pikachat sidecar not running for account ${aid}`);
-      }
-      const groupId = normalizeGroupId(to);
-      if (!looksLikeGroupIdHex(groupId)) {
-        throw new Error(`invalid pikachat group id: ${to}`);
-      }
+      const { handle, groupId } = resolveOutboundTarget(to, accountId);
       await handle.sidecar.sendMessage(groupId, text ?? "");
       return { channel: "pikachat", to: groupId };
     },
-    sendMedia: async () => {
-      throw new Error("pikachat does not support media");
+    sendMedia: async ({ to, text, mediaUrl, accountId }) => {
+      const { handle, groupId } = resolveOutboundTarget(to, accountId);
+      if (!mediaUrl) {
+        throw new Error("sendMedia requires a mediaUrl");
+      }
+
+      // Download media to a temp file so the sidecar can read it
+      const tempDir = mkdtempSync(path.join(tmpdir(), "pikachat-media-"));
+      const urlObj = new URL(mediaUrl);
+      const basename = path.basename(urlObj.pathname) || "file.bin";
+      const tempFile = path.join(tempDir, basename);
+      try {
+        const resp = await fetch(mediaUrl, { signal: AbortSignal.timeout(60_000) });
+        if (!resp.ok) {
+          throw new Error(`download failed: HTTP ${resp.status}`);
+        }
+        const arrayBuf = await resp.arrayBuffer();
+        writeFileSync(tempFile, Buffer.from(arrayBuf));
+      } catch (err) {
+        rmSync(tempDir, { recursive: true, force: true });
+        throw new Error(`failed to download media from ${mediaUrl}: ${err}`);
+      }
+
+      try {
+        const result = (await handle.sidecar.sendMedia(groupId, tempFile, {
+          caption: text ?? "",
+        })) as any;
+        return { channel: "pikachat" as const, to: groupId, messageId: result?.event_id ?? "" };
+      } finally {
+        // Clean up temp file after a delay to ensure sidecar has read it
+        const timer = setTimeout(() => {
+          rmSync(tempDir, { recursive: true, force: true });
+        }, 30_000);
+        (timer as any).unref?.();
+      }
     },
   },
 
@@ -1147,6 +1185,17 @@ export const pikachatPlugin: ChannelPlugin<ResolvedPikachatAccount> = {
             ev.content = `[Voted "${pollResponse.selected}"]`;
           }
 
+          // Augment content with media attachment descriptions so the agent can see them
+          let messageText = ev.content;
+          if (ev.media && ev.media.length > 0) {
+            const mediaLines = ev.media.map((m) => {
+              const dims = m.width && m.height ? ` (${m.width}x${m.height})` : "";
+              return `[Attachment: ${m.filename} — ${m.mime_type}${dims}]`;
+            });
+            const suffix = "\n" + mediaLines.join("\n");
+            messageText = messageText ? messageText + suffix : mediaLines.join("\n");
+          }
+
           try {
             const senderPk = String(ev.from_pubkey).trim().toLowerCase();
             const senderIsOwner = isOwnerPubkey(senderPk);
@@ -1169,7 +1218,7 @@ export const pikachatPlugin: ChannelPlugin<ResolvedPikachatAccount> = {
                 );
               }
               const requireMention = oneOnOne ? false : resolveRequireMention(groupId, currentCfg);
-              const wasMentioned = handle ? detectMention(ev.content, handle.pubkey, handle.npub, currentCfg) : false;
+              const wasMentioned = handle ? detectMention(messageText, handle.pubkey, handle.npub, currentCfg) : false;
 
               if (requireMention && !wasMentioned) {
                 // Not mentioned — buffer for context, don't dispatch.
@@ -1178,7 +1227,7 @@ export const pikachatPlugin: ChannelPlugin<ResolvedPikachatAccount> = {
                 const senderName = resolveMemberName(senderPk, currentCfg);
                 recordPendingHistory(historyKey, {
                   sender: senderName,
-                  body: ev.content,
+                  body: messageText,
                   timestamp: ev.created_at ? ev.created_at * 1000 : Date.now(),
                 });
                 ctx.log?.debug(
@@ -1202,7 +1251,7 @@ export const pikachatPlugin: ChannelPlugin<ResolvedPikachatAccount> = {
                 accountId: resolved.accountId,
                 senderId: ev.from_pubkey,
                 chatId: ev.nostr_group_id,
-                text: ev.content,
+                text: messageText,
                 isOwner: senderIsOwner,
                 isGroupChat: true,
                 wasMentioned,
@@ -1232,7 +1281,7 @@ export const pikachatPlugin: ChannelPlugin<ResolvedPikachatAccount> = {
                 accountId: resolved.accountId,
                 senderId: ev.from_pubkey,
                 chatId: ev.nostr_group_id,
-                text: ev.content,
+                text: messageText,
                 isOwner: senderIsOwner,
                 isGroupChat: false,
                 deliverText: async (responseText: string) => {

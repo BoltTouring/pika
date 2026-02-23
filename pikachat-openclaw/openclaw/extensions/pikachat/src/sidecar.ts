@@ -26,6 +26,16 @@ type SidecarOutMsg =
       content: string;
       created_at: number;
       message_id: string;
+      media?: Array<{
+        url: string;
+        mime_type: string;
+        filename: string;
+        original_hash_hex: string;
+        nonce_hex: string;
+        scheme_version: string;
+        width?: number | null;
+        height?: number | null;
+      }>;
     }
   | {
       type: "call_invite_received";
@@ -75,6 +85,16 @@ type SidecarInCmd =
   | { cmd: "send_audio_response"; request_id: string; call_id: string; tts_text: string }
   | { cmd: "send_audio_file"; request_id: string; call_id: string; audio_path: string; sample_rate: number; channels?: number }
   | { cmd: "init_group"; request_id: string; peer_pubkey: string; group_name?: string }
+  | {
+      cmd: "send_media";
+      request_id: string;
+      nostr_group_id: string;
+      file_path: string;
+      mime_type?: string;
+      filename?: string;
+      caption?: string;
+      blossom_servers?: string[];
+    }
   | { cmd: "shutdown"; request_id: string };
 
 type SidecarEventHandler = (msg: SidecarOutMsg) => void | Promise<void>;
@@ -260,6 +280,27 @@ export class PikachatSidecar {
 
   async sendMessage(nostrGroupId: string, content: string): Promise<void> {
     await this.request({ cmd: "send_message", nostr_group_id: nostrGroupId, content } as any);
+  }
+
+  async sendMedia(
+    nostrGroupId: string,
+    filePath: string,
+    opts?: {
+      mimeType?: string;
+      filename?: string;
+      caption?: string;
+      blossomServers?: string[];
+    },
+  ): Promise<unknown> {
+    return await this.request({
+      cmd: "send_media",
+      nostr_group_id: nostrGroupId,
+      file_path: filePath,
+      mime_type: opts?.mimeType,
+      filename: opts?.filename,
+      caption: opts?.caption,
+      blossom_servers: opts?.blossomServers,
+    } as any);
   }
 
   async sendTyping(nostrGroupId: string): Promise<void> {
