@@ -1186,7 +1186,8 @@ export const pikachatPlugin: ChannelPlugin<ResolvedPikachatAccount> = {
           if (ev.media && ev.media.length > 0) {
             const mediaLines = ev.media.map((m) => {
               const dims = m.width && m.height ? ` (${m.width}x${m.height})` : "";
-              return `[Attachment: ${m.filename} — ${m.mime_type}${dims}]`;
+              const localFile = m.local_path ? ` file://${m.local_path}` : "";
+              return `[Attachment: ${m.filename} — ${m.mime_type}${dims}${localFile}]`;
             });
             const suffix = "\n" + mediaLines.join("\n");
             messageText = messageText ? messageText + suffix : mediaLines.join("\n");
@@ -1291,6 +1292,19 @@ export const pikachatPlugin: ChannelPlugin<ResolvedPikachatAccount> = {
             ctx.log?.error(
               `[${resolved.accountId}] dispatchInboundToAgent failed: ${err}`,
             );
+          } finally {
+            // Clean up decrypted media temp files after the agent has had time to read them
+            if (ev.media && ev.media.length > 0) {
+              const paths = ev.media.map((m) => m.local_path).filter(Boolean) as string[];
+              if (paths.length > 0) {
+                const timer = setTimeout(() => {
+                  for (const p of paths) {
+                    try { rmSync(p, { force: true }); } catch {}
+                  }
+                }, 5 * 60 * 1000); // 5 minutes
+                (timer as any).unref?.();
+              }
+            }
           }
         }
       });

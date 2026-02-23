@@ -224,6 +224,9 @@ struct MediaAttachmentOut {
     width: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     height: Option<u32>,
+    /// Local file path to the decrypted media (temp file). Only set on receive.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    local_path: Option<String>,
 }
 
 fn default_channels() -> u16 {
@@ -301,7 +304,49 @@ fn media_ref_to_attachment(reference: MediaReference) -> MediaAttachmentOut {
         scheme_version: reference.scheme_version,
         width,
         height,
+        local_path: None,
     }
+}
+
+/// Download encrypted media from Blossom, decrypt it, and write to a temp file.
+/// Returns the local file path on success.
+async fn download_and_decrypt_media(
+    mdk: &MDK<MdkSqliteStorage>,
+    mls_group_id: &GroupId,
+    reference: &MediaReference,
+    state_dir: &Path,
+) -> anyhow::Result<String> {
+    let client = reqwest::Client::new();
+    let response = client
+        .get(&reference.url)
+        .send()
+        .await
+        .with_context(|| format!("download encrypted media from {}", reference.url))?;
+    if !response.status().is_success() {
+        anyhow::bail!("download failed: HTTP {}", response.status());
+    }
+    let encrypted_data = response.bytes().await.context("read media body")?;
+    let manager = mdk.media_manager(mls_group_id.clone());
+    let decrypted = manager
+        .decrypt_from_download(&encrypted_data, reference)
+        .context("decrypt media")?;
+
+    // Write to a temp directory under the state dir
+    let media_dir = state_dir.join("media-tmp");
+    std::fs::create_dir_all(&media_dir).context("create media-tmp dir")?;
+    let filename = if reference.filename.is_empty() {
+        "download.bin"
+    } else {
+        &reference.filename
+    };
+    let dest = media_dir.join(format!(
+        "{}-{}",
+        hex::encode(&reference.original_hash[..8]),
+        filename,
+    ));
+    std::fs::write(&dest, &decrypted)
+        .with_context(|| format!("write decrypted media to {}", dest.display()))?;
+    Ok(dest.to_string_lossy().into_owned())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2311,6 +2356,7 @@ pub async fn daemon_main(
                                                         if is_typing_indicator(&msg) {
                                                             continue;
                                                         }
+                                                        // Backfill: parse imeta tags but skip download (too slow for bulk history)
                                                         let media: Vec<MediaAttachmentOut> = {
                                                             let mgr = mdk.media_manager(msg.mls_group_id.clone());
                                                             msg.tags.iter()
@@ -3276,14 +3322,22 @@ pub async fn daemon_main(
                             if is_typing_indicator(&msg) {
                                 continue;
                             }
-                            let media: Vec<MediaAttachmentOut> = {
+                            let mut media: Vec<MediaAttachmentOut> = Vec::new();
+                            {
                                 let mgr = mdk.media_manager(msg.mls_group_id.clone());
-                                msg.tags.iter()
+                                let refs: Vec<MediaReference> = msg.tags.iter()
                                     .filter(|t| is_imeta_tag(t))
                                     .filter_map(|t| mgr.parse_imeta_tag(t).ok())
-                                    .map(media_ref_to_attachment)
-                                    .collect()
-                            };
+                                    .collect();
+                                for r in refs {
+                                    let mut att = media_ref_to_attachment(r.clone());
+                                    match download_and_decrypt_media(&mdk, &msg.mls_group_id, &r, state_dir).await {
+                                        Ok(path) => att.local_path = Some(path),
+                                        Err(e) => warn!("[pikachat] media download failed url={}: {e:#}", r.url),
+                                    }
+                                    media.push(att);
+                                }
+                            }
                             out_tx.send(OutMsg::MessageReceived {
                                 nostr_group_id,
                                 from_pubkey: sender_hex,
@@ -3713,6 +3767,7 @@ mod tests {
                 scheme_version: "v1".into(),
                 width: Some(800),
                 height: Some(600),
+                local_path: Some("/tmp/decrypted.png".into()),
             }],
         };
         let json = serde_json::to_value(&msg).unwrap();
@@ -3742,6 +3797,7 @@ mod tests {
                 scheme_version: "v1".into(),
                 width: None,
                 height: None,
+                local_path: None,
             }],
         };
         let json = serde_json::to_value(&msg).unwrap();

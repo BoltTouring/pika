@@ -35,6 +35,7 @@ type SidecarOutMsg =
         scheme_version: string;
         width?: number | null;
         height?: number | null;
+        local_path?: string | null;
       }>;
     }
   | {
