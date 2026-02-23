@@ -289,6 +289,10 @@ struct MediaAttachmentView: View {
         attachment.mimeType.hasPrefix("image/")
     }
 
+    private var isAudio: Bool {
+        attachment.mimeType.hasPrefix("audio/")
+    }
+
     private var aspectRatio: CGFloat {
         if let w = attachment.width, let h = attachment.height, w > 0, h > 0 {
             return CGFloat(w) / CGFloat(h)
@@ -308,6 +312,12 @@ struct MediaAttachmentView: View {
     var body: some View {
         if isImage {
             imageContent
+        } else if isAudio {
+            VoiceMessageView(
+                attachment: attachment,
+                isMine: isMine,
+                onDownload: onDownload
+            )
         } else {
             fileRow
         }
