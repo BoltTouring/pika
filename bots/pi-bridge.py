@@ -12,10 +12,7 @@ from __future__ import annotations
 import base64
 import json
 import os
-import pty
-import select
-import signal
-import struct
+import shlex
 import subprocess
 import sys
 import termios
@@ -104,7 +101,12 @@ def emit_pi_event(group_id: str, payload: dict) -> None:
 
 def spawn_pi_rpc(label: str) -> subprocess.Popen[bytes]:
     env = os.environ.copy()
-    cmd = ["pi", "--mode", "rpc", "--no-session", "--provider", "anthropic"]
+    cmd = shlex.split(
+        os.environ.get(
+            "PI_CMD",
+            "pi --mode rpc --no-session --provider anthropic",
+        )
+    )
     model = os.environ.get("PI_MODEL")
     if model:
         cmd.extend(["--model", model])

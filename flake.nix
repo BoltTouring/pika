@@ -24,9 +24,13 @@
       url = "github:Mic92/sops-nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    microvm = {
+      url = "github:microvm-nix/microvm.nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
-  outputs = { self, nixpkgs, flake-utils, moq, rust-overlay, android-nixpkgs, disko, sops-nix }:
+  outputs = { self, nixpkgs, flake-utils, moq, rust-overlay, android-nixpkgs, disko, sops-nix, microvm }:
     let
       mkRelay = hostFile: nixpkgs.lib.nixosSystem {
         system = "x86_64-linux";
@@ -66,6 +70,58 @@
         doCheck = false;
         nativeBuildInputs = [ serverPkgs.pkg-config ];
         buildInputs = [ serverPkgs.openssl serverPkgs.postgresql.lib ];
+      };
+
+      vmSpawnerPkg = serverPkgs.rustPlatform.buildRustPackage {
+        pname = "vm-spawner";
+        version = "0.1.0";
+        src = serverPkgs.lib.cleanSourceWith {
+          src = serverPkgs.lib.sourceByRegex ./. [
+            "Cargo\\.toml"
+            "Cargo\\.lock"
+            "crates(/.*)?"
+            "rust(/.*)?"
+            "cli(/.*)?"
+            "uniffi-bindgen(/.*)?"
+          ];
+          filter = path: type: !(serverPkgs.lib.hasInfix ".pgdata" path);
+        };
+        cargoLock = {
+          lockFile = ./Cargo.lock;
+          outputHashes = {
+            "mdk-core-0.6.0" = "sha256-7U9hTItXHOo5VtdvfxwOUo2M22wUnHK4Oi3TlmfjM+4=";
+            "moq-lite-0.14.0" = "sha256-CVoVjbuezyC21gl/pEnU/S/2oRaDlvn2st7WBoUnWo8=";
+          };
+        };
+        cargoBuildFlags = [ "-p" "vm-spawner" "-p" "marmotd" ];
+        doCheck = false;
+        nativeBuildInputs = [ serverPkgs.pkg-config ];
+        buildInputs = [ serverPkgs.openssl serverPkgs.postgresql.lib ];
+      };
+
+      piAgentPkg = serverPkgs.buildNpmPackage rec {
+        pname = "pi-coding-agent-runtime";
+        version = "0.54.2";
+        src = ./nix/pi-agent;
+
+        npmDepsHash = "sha256-A4lcAOsPMd9IeFcURce4zjSuEyjSjdITrqBfPjF7V2I=";
+        dontNpmBuild = true;
+
+        installPhase = ''
+          runHook preInstall
+          mkdir -p "$out/libexec/pi-agent-runtime"
+          cp -R node_modules package.json package-lock.json "$out/libexec/pi-agent-runtime"/
+          mkdir -p "$out/bin"
+          ln -s "$out/libexec/pi-agent-runtime/node_modules/.bin/pi" "$out/bin/pi"
+          runHook postInstall
+        '';
+
+        meta = with serverPkgs.lib; {
+          description = "Pinned runtime for the pi coding agent";
+          homepage = "https://www.npmjs.com/package/@mariozechner/pi-coding-agent";
+          license = licenses.mit;
+          platforms = platforms.linux;
+        };
       };
 
       pikaRelayPkg = serverPkgs.buildGoModule {
@@ -471,6 +527,11 @@ PGEOF
         };
       }
     ) // {
+      packages."x86_64-linux" = {
+        vm-spawner = vmSpawnerPkg;
+        pi-agent-runtime = piAgentPkg;
+      };
+
       nixosConfigurations = {
         relay-moq-ash = mkRelay ./infra/nix/hosts/relay-moq-ash.nix;
         relay-moq-hil = mkRelay ./infra/nix/hosts/relay-moq-hil.nix;
@@ -489,10 +550,11 @@ PGEOF
 
         pika-build = nixpkgs.lib.nixosSystem {
           system = "x86_64-linux";
-          specialArgs = { inherit sops-nix; };
+          specialArgs = { inherit sops-nix vmSpawnerPkg piAgentPkg; };
           modules = [
             disko.nixosModules.disko
             sops-nix.nixosModules.sops
+            microvm.nixosModules.host
             (import ./infra/nix/hosts/builder.nix)
           ];
         };

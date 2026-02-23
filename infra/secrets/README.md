@@ -49,3 +49,9 @@ After first deploy, add the builder server's age public key to `.sops.yaml` and 
 ```
 sops updatekeys infra/secrets/builder-cache-key.yaml
 ```
+
+## microVM host notes
+
+The `pika-build` microVM host stack (`vm-spawner` + `microvm.nix`) does not currently
+require an additional sops secret for agent LLM keys. The `pika-cli agent new --provider microvm`
+flow forwards provider keys directly from the local environment to the guest process.

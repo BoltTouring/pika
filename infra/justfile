@@ -604,6 +604,14 @@ build-deploy:
     echo "  [3/3] Done!"
     echo "==> pika-build deployed!"
 
+# Deploy microVM host stack on pika-build (alias for build-deploy)
+build-deploy-microvms:
+    just build-deploy
+
+# Open SSH tunnel to vm-spawner localhost API
+build-vmspawner-tunnel:
+    ssh -L 8080:127.0.0.1:8080 pika-build
+
 # SSH into pika-build
 build-ssh:
     ssh pika-build

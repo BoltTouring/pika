@@ -1,21 +1,26 @@
 mod fly_machines;
 mod harness;
 mod mdk_util;
+mod microvm_spawner;
 mod relay_util;
 
 use std::collections::HashMap;
 use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::time::Duration;
 
-use anyhow::{Context, anyhow};
-use clap::{Parser, Subcommand};
+use anyhow::{anyhow, Context};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use mdk_core::encrypted_media::types::{MediaProcessingOptions, MediaReference};
 use mdk_core::prelude::*;
 use nostr_blossom::client::BlossomClient;
 use nostr_sdk::prelude::*;
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
 // Same defaults as the Pika app (rust/src/core/config.rs).
 const DEFAULT_RELAY_URLS: &[&str] = &[
@@ -32,58 +37,8 @@ const DEFAULT_KP_RELAY_URLS: &[&str] = &[
     "wss://nostr-02.yakihonne.com",
 ];
 
-fn default_state_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("XDG_STATE_HOME") {
-        let dir = dir.trim();
-        if !dir.is_empty() {
-            return PathBuf::from(dir).join("pikachat");
-        }
-    }
-    if let Ok(home) = std::env::var("HOME") {
-        let home = home.trim();
-        if !home.is_empty() {
-            return PathBuf::from(home)
-                .join(".local")
-                .join("state")
-                .join("pikachat");
-        }
-    }
-    PathBuf::from(".pikachat")
-}
-
-const DEFAULT_AGENT_MOQ_URLS: &[&str] = &[
-    "https://us-east.moq.pikachat.org/anon",
-    "https://eu.moq.pikachat.org/anon",
-];
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AgentUiMode {
-    Pty,
-    Rpc,
-    Nostr,
-}
-
-impl AgentUiMode {
-    fn from_env() -> anyhow::Result<Self> {
-        let raw = std::env::var("PIKA_AGENT_UI_MODE").unwrap_or_else(|_| "pty".to_string());
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "" | "pty" => Ok(Self::Pty),
-            "rpc" => Ok(Self::Rpc),
-            "nostr" | "marmot" | "chat" => Ok(Self::Nostr),
-            other => anyhow::bail!(
-                "invalid PIKA_AGENT_UI_MODE={other}; expected one of: pty, rpc, nostr"
-            ),
-        }
-    }
-
-    fn bridge_call_mode(self) -> Option<&'static str> {
-        match self {
-            Self::Pty => Some("pty"),
-            Self::Rpc => Some("rpc"),
-            Self::Nostr => Some("rpc"),
-        }
-    }
-}
+const PI_BRIDGE_PY: &str = include_str!("../../bots/pi-bridge.py");
+const PI_BRIDGE_SH: &str = include_str!("../../bots/pi-bridge.sh");
 
 #[derive(Debug, Parser)]
 #[command(name = "pikachat")]
@@ -305,44 +260,84 @@ If --output is omitted, the original filename from the sender is used.")]
         lookback: u64,
     },
 
-    /// Long-running JSONL sidecar daemon intended to be embedded/invoked by OpenClaw
-    Daemon {
-        /// Giftwrap lookback window (NIP-59 backdates timestamps; use hours/days, not seconds)
-        #[arg(long, default_value_t = 60 * 60 * 24 * 3)]
-        giftwrap_lookback_sec: u64,
-
-        /// Only accept welcomes and messages from these pubkeys (hex). Repeatable.
-        /// If empty, all pubkeys are allowed (open mode).
-        #[arg(long)]
-        allow_pubkey: Vec<String>,
-
-        /// Automatically accept incoming MLS welcomes (group invitations).
-        #[arg(long, default_value_t = false)]
-        auto_accept_welcomes: bool,
-
-        /// Spawn a child process and bridge its stdio to the pikachat JSONL protocol.
-        /// pikachat OutMsg lines are written to the child's stdin; the child's stdout
-        /// lines are parsed as pikachat InCmd and executed. This turns pikachat into a
-        /// self-contained bot runtime.
-        #[arg(long)]
-        exec: Option<String>,
-    },
-
-    /// Manage AI agents on Fly.io
+    /// Manage AI agents
     Agent {
         #[command(subcommand)]
         cmd: AgentCommand,
     },
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum AgentProviderArg {
+    Fly,
+    Microvm,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum SpawnVariantArg {
+    Prebuilt,
+    #[value(name = "prebuilt-cow")]
+    PrebuiltCow,
+    Legacy,
+}
+
+impl SpawnVariantArg {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Prebuilt => "prebuilt",
+            Self::PrebuiltCow => "prebuilt-cow",
+            Self::Legacy => "legacy",
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+struct AgentNewArgs {
+    /// Runtime provider
+    #[arg(long, value_enum, default_value_t = AgentProviderArg::Fly)]
+    provider: AgentProviderArg,
+
+    /// Machine name hint (Fly only; default: agent-<random>)
+    #[arg(long)]
+    name: Option<String>,
+
+    /// vm-spawner base URL (microvm only)
+    #[arg(long, default_value = "http://127.0.0.1:8080")]
+    spawner_url: String,
+
+    /// vm-spawner variant (microvm only)
+    #[arg(long, value_enum, default_value_t = SpawnVariantArg::Prebuilt)]
+    spawn_variant: SpawnVariantArg,
+
+    /// Flake ref used in the guest (microvm only)
+    #[arg(long, default_value = "github:sledtools/pika")]
+    flake_ref: String,
+
+    /// Dev shell used in the guest (microvm only)
+    #[arg(long, default_value = "default")]
+    dev_shell: String,
+
+    /// vCPU count (microvm only)
+    #[arg(long, default_value_t = 1)]
+    cpu: u32,
+
+    /// Memory in MiB (microvm only)
+    #[arg(long, default_value_t = 1024)]
+    memory_mb: u32,
+
+    /// VM TTL in seconds (microvm only)
+    #[arg(long, default_value_t = 7200)]
+    ttl_seconds: u64,
+
+    /// Keep VM running on exit (microvm only)
+    #[arg(long, default_value_t = false)]
+    keep: bool,
+}
+
 #[derive(Debug, Subcommand)]
 enum AgentCommand {
-    /// Create a new pi agent on Fly.io and start chatting
-    New {
-        /// Machine name (default: agent-<random>)
-        #[arg(long)]
-        name: Option<String>,
-    },
+    /// Create a new pi agent and start chatting
+    New(AgentNewArgs),
 }
 
 #[tokio::main]
@@ -443,7 +438,7 @@ async fn main() -> anyhow::Result<()> {
             .await
         }
         Command::Agent { cmd } => match cmd {
-            AgentCommand::New { name } => cmd_agent_new(&cli, name.as_deref()).await,
+            AgentCommand::New(args) => cmd_agent_new(&cli, args).await,
         },
     }
 }
@@ -1235,14 +1230,520 @@ async fn cmd_download_media(
     Ok(())
 }
 
-async fn cmd_agent_new(cli: &Cli, name: Option<&str>) -> anyhow::Result<()> {
-    let ui_mode = AgentUiMode::from_env()?;
-    let fly = fly_machines::FlyClient::from_env()?;
-    let anthropic_key = std::env::var("ANTHROPIC_API_KEY")
-        .context("ANTHROPIC_API_KEY must be set (for example in .env)")?;
-    let anthropic_key = anthropic_key.trim().to_string();
-    if anthropic_key.is_empty() {
-        anyhow::bail!("ANTHROPIC_API_KEY must be non-empty");
+#[derive(Debug)]
+enum AgentRuntimeHandle {
+    Fly {
+        machine_id: String,
+        app_name: String,
+    },
+    Microvm {
+        spawner_url: String,
+        vm_id: String,
+        ip: String,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct AgentSpawnConfig {
+    bot_secret_hex: String,
+    anthropic_key: String,
+    openai_key: Option<String>,
+    pi_model: Option<String>,
+    relays: Vec<String>,
+}
+
+struct FlyProvider {
+    client: fly_machines::FlyClient,
+}
+
+struct MicrovmProvider {
+    client: microvm_spawner::MicrovmSpawnerClient,
+    ssh_jump: Option<String>,
+}
+
+enum AgentProvider {
+    Fly(FlyProvider),
+    Microvm(MicrovmProvider),
+}
+
+impl AgentProvider {
+    async fn spawn(
+        &self,
+        args: &AgentNewArgs,
+        spawn: &AgentSpawnConfig,
+    ) -> anyhow::Result<AgentRuntimeHandle> {
+        match self {
+            AgentProvider::Fly(provider) => provider.spawn(args.name.as_deref(), spawn).await,
+            AgentProvider::Microvm(provider) => provider.spawn(args, spawn).await,
+        }
+    }
+
+    async fn teardown(&self, runtime: &AgentRuntimeHandle) -> anyhow::Result<()> {
+        match (self, runtime) {
+            (AgentProvider::Fly(_), AgentRuntimeHandle::Fly { .. }) => Ok(()),
+            (AgentProvider::Microvm(provider), AgentRuntimeHandle::Microvm { vm_id, .. }) => {
+                provider.client.delete_vm(vm_id).await
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn keypackage_timeout(&self) -> Duration {
+        match self {
+            AgentProvider::Fly(_) => Duration::from_secs(120),
+            AgentProvider::Microvm(_) => Duration::from_secs(600),
+        }
+    }
+
+    fn keypackage_fetch_timeout(&self) -> Duration {
+        match self {
+            AgentProvider::Fly(_) => Duration::from_secs(5),
+            AgentProvider::Microvm(_) => Duration::from_secs(2),
+        }
+    }
+
+    fn keypackage_retry_interval(&self) -> Duration {
+        match self {
+            AgentProvider::Fly(_) => Duration::from_secs(3),
+            AgentProvider::Microvm(_) => Duration::from_secs(1),
+        }
+    }
+}
+
+impl FlyProvider {
+    async fn spawn(
+        &self,
+        name_hint: Option<&str>,
+        spawn: &AgentSpawnConfig,
+    ) -> anyhow::Result<AgentRuntimeHandle> {
+        let suffix = format!("{:08x}", rand::random::<u32>());
+        let volume_name = format!("agent_{suffix}");
+        let machine_name = name_hint
+            .map(std::string::ToString::to_string)
+            .unwrap_or_else(|| format!("agent-{suffix}"));
+
+        eprint!("Creating Fly volume...");
+        std::io::stderr().flush().ok();
+        let volume = self.client.create_volume(&volume_name).await?;
+        eprintln!(" done ({})", volume.id);
+
+        let mut env = HashMap::new();
+        env.insert("STATE_DIR".to_string(), "/app/state".to_string());
+        env.insert("NOSTR_SECRET_KEY".to_string(), spawn.bot_secret_hex.clone());
+        env.insert("ANTHROPIC_API_KEY".to_string(), spawn.anthropic_key.clone());
+        if let Some(openai) = &spawn.openai_key {
+            env.insert("OPENAI_API_KEY".to_string(), openai.clone());
+        }
+        if let Some(model) = &spawn.pi_model {
+            env.insert("PI_MODEL".to_string(), model.clone());
+        }
+
+        eprint!("Creating Fly machine...");
+        std::io::stderr().flush().ok();
+        let machine = self
+            .client
+            .create_machine(&machine_name, &volume.id, env)
+            .await?;
+        eprintln!(" done ({})", machine.id);
+
+        Ok(AgentRuntimeHandle::Fly {
+            machine_id: machine.id,
+            app_name: self.client.app_name().to_string(),
+        })
+    }
+}
+
+impl MicrovmProvider {
+    async fn spawn(
+        &self,
+        args: &AgentNewArgs,
+        spawn: &AgentSpawnConfig,
+    ) -> anyhow::Result<AgentRuntimeHandle> {
+        let request = microvm_spawner::CreateVmRequest {
+            flake_ref: Some(args.flake_ref.clone()),
+            dev_shell: Some(args.dev_shell.clone()),
+            cpu: Some(args.cpu),
+            memory_mb: Some(args.memory_mb),
+            ttl_seconds: Some(args.ttl_seconds),
+            spawn_variant: Some(args.spawn_variant.as_str().to_string()),
+        };
+
+        eprint!("Spawning microVM...");
+        std::io::stderr().flush().ok();
+        let vm = self
+            .client
+            .create_vm(&request)
+            .await
+            .with_context(|| {
+                format!(
+                    "spawn microvm via {} (if this is a 5xx, check vm-spawner/dnsmasq on pika-build and verify SSH tunnel: just -f infra/justfile build-vmspawner-tunnel)",
+                    self.client.base_url()
+                )
+            })?;
+        eprintln!(" done ({} @ {})", vm.id, vm.ip);
+
+        let key_path = write_temp_private_key(&vm.ssh_private_key)?;
+        let mut ssh_ip = vm.ip.clone();
+        let start_result = async {
+            eprint!("Waiting for SSH...");
+            std::io::stderr().flush().ok();
+            ssh_ip = wait_for_ssh_with_ip_refresh(
+                &self.client,
+                &vm.id,
+                &vm.ip,
+                &vm.ssh_user,
+                vm.ssh_port,
+                &key_path,
+                self.ssh_jump.as_deref(),
+                Duration::from_secs(60),
+            )
+            .await?;
+            eprintln!(" done");
+
+            eprint!("Starting guest agent process...");
+            std::io::stderr().flush().ok();
+            start_guest_agent_process(
+                &ssh_ip,
+                &vm.ssh_user,
+                vm.ssh_port,
+                &key_path,
+                self.ssh_jump.as_deref(),
+                spawn,
+            )
+            .await?;
+            eprintln!(" done");
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        let _ = std::fs::remove_file(&key_path);
+        start_result?;
+
+        Ok(AgentRuntimeHandle::Microvm {
+            spawner_url: self.client.base_url().to_string(),
+            vm_id: vm.id,
+            ip: ssh_ip,
+        })
+    }
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn write_temp_private_key(private_key: &str) -> anyhow::Result<PathBuf> {
+    let path = std::env::temp_dir().join(format!("pika-microvm-{}.key", rand::random::<u64>()));
+    std::fs::write(&path, private_key)
+        .with_context(|| format!("write temporary ssh key {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        let permissions = std::fs::Permissions::from_mode(0o600);
+        std::fs::set_permissions(&path, permissions)
+            .with_context(|| format!("chmod 600 {}", path.display()))?;
+    }
+    Ok(path)
+}
+
+async fn wait_for_ssh_with_ip_refresh(
+    client: &microvm_spawner::MicrovmSpawnerClient,
+    vm_id: &str,
+    initial_ip: &str,
+    user: &str,
+    port: u16,
+    key_path: &Path,
+    jump_host: Option<&str>,
+    timeout: Duration,
+) -> anyhow::Result<String> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut current_ip = initial_ip.to_string();
+    loop {
+        if check_ssh_ready(&current_ip, user, port, key_path, jump_host).await? {
+            return Ok(current_ip);
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            anyhow::bail!("timed out waiting for SSH on {user}@{current_ip}:{port}");
+        }
+        let remaining = deadline.saturating_duration_since(now);
+        let refresh_budget = remaining.min(Duration::from_secs(2));
+
+        if refresh_budget > Duration::ZERO {
+            if let Ok(Ok(vm)) = tokio::time::timeout(refresh_budget, client.get_vm(vm_id)).await {
+                if vm.id == vm_id && vm.ip != current_ip {
+                    eprint!(" (ip update {} -> {})", current_ip, vm.ip);
+                    std::io::stderr().flush().ok();
+                    current_ip = vm.ip;
+                }
+            }
+        }
+
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            anyhow::bail!("timed out waiting for SSH on {user}@{current_ip}:{port}");
+        }
+        let sleep_for = deadline
+            .saturating_duration_since(now)
+            .min(Duration::from_secs(1));
+        tokio::time::sleep(sleep_for).await;
+    }
+}
+
+async fn check_ssh_ready(
+    ip: &str,
+    user: &str,
+    port: u16,
+    key_path: &Path,
+    jump_host: Option<&str>,
+) -> anyhow::Result<bool> {
+    let mut command = tokio::process::Command::new("ssh");
+    command
+        .arg("-i")
+        .arg(key_path)
+        .arg("-o")
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg("StrictHostKeyChecking=no")
+        .arg("-o")
+        .arg("UserKnownHostsFile=/dev/null")
+        .arg("-o")
+        .arg("ConnectTimeout=3");
+    if let Some(jump_host) = jump_host {
+        command.arg("-o").arg(format!(
+            "ProxyCommand=ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null {jump_host} -W %h:%p"
+        ));
+    }
+    let status = command
+        .arg("-p")
+        .arg(port.to_string())
+        .arg(format!("{user}@{ip}"))
+        .arg("true")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .context("spawn ssh readiness check")?;
+    Ok(status.success())
+}
+
+async fn run_ssh_script(
+    ip: &str,
+    user: &str,
+    port: u16,
+    key_path: &Path,
+    jump_host: Option<&str>,
+    script: &str,
+) -> anyhow::Result<()> {
+    let mut command = tokio::process::Command::new("ssh");
+    command
+        .arg("-i")
+        .arg(key_path)
+        .arg("-o")
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg("StrictHostKeyChecking=no")
+        .arg("-o")
+        .arg("UserKnownHostsFile=/dev/null")
+        .arg("-o")
+        .arg("ConnectTimeout=8");
+    if let Some(jump_host) = jump_host {
+        command.arg("-o").arg(format!(
+            "ProxyCommand=ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null {jump_host} -W %h:%p"
+        ));
+    }
+    let mut child = command
+        .arg("-p")
+        .arg(port.to_string())
+        .arg(format!("{user}@{ip}"))
+        .arg("bash -seu")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .context("spawn ssh command")?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(script.as_bytes())
+            .await
+            .context("write ssh script to stdin")?;
+    }
+
+    let status = child.wait().await.context("wait for ssh command")?;
+    if !status.success() {
+        anyhow::bail!("remote command failed with status {status}");
+    }
+    Ok(())
+}
+
+async fn start_guest_agent_process(
+    ip: &str,
+    user: &str,
+    port: u16,
+    key_path: &Path,
+    jump_host: Option<&str>,
+    spawn: &AgentSpawnConfig,
+) -> anyhow::Result<()> {
+    let relay_flags = spawn
+        .relays
+        .iter()
+        .map(|relay| format!("--relay {}", shell_quote(relay)))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let mut exports = vec![
+        format!(
+            "export NOSTR_SECRET_KEY={}",
+            shell_quote(&spawn.bot_secret_hex)
+        ),
+        format!(
+            "export ANTHROPIC_API_KEY={}",
+            shell_quote(&spawn.anthropic_key)
+        ),
+        "export CARGO_TARGET_DIR=/workspace/pika-agent/target".to_string(),
+    ];
+    if let Some(openai) = &spawn.openai_key {
+        exports.push(format!("export OPENAI_API_KEY={}", shell_quote(openai)));
+    }
+    if let Some(model) = &spawn.pi_model {
+        exports.push(format!("export PI_MODEL={}", shell_quote(model)));
+    }
+
+    let run_script = format!(
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+{}
+if [ -f /run/agent-meta/env ]; then
+  set -a
+  . /run/agent-meta/env
+  set +a
+fi
+STATE_DIR=/workspace/pika-agent/state
+mkdir -p "$STATE_DIR"
+
+PI_RUNTIME_DIR="${{PIKA_RUNTIME_ARTIFACTS_GUEST:-/opt/runtime-artifacts}}"
+PI_RUNTIME_BIN="$PI_RUNTIME_DIR/pi/bin/pi"
+PI_LEGACY_HOME="${{PIKA_PI_HOME_GUEST:-/opt/pi-home}}"
+PI_LEGACY_BIN="$PI_LEGACY_HOME/node_modules/.bin/pi"
+if [ -x "$PI_RUNTIME_BIN" ]; then
+  export PATH="$PI_RUNTIME_DIR/pi/bin:$PATH"
+  if [ -z "${{PI_CMD:-}}" ]; then
+    export PI_CMD="pi --mode rpc --no-session --provider anthropic"
+  fi
+elif [ -x "$PI_LEGACY_BIN" ]; then
+  export PATH="$PI_LEGACY_HOME/node_modules/.bin:$PATH"
+  if [ -z "${{PI_CMD:-}}" ]; then
+    export PI_CMD="pi --mode rpc --no-session --provider anthropic"
+  fi
+elif [ -z "${{PI_CMD:-}}" ]; then
+  # Fallback for non-prebuilt/dev flows where the runtime artifact mount is unavailable.
+  export PI_CMD="npx --yes @mariozechner/pi-coding-agent --mode rpc --no-session --provider anthropic"
+fi
+
+BRIDGE_CMD="bash /workspace/pika-agent/pi-bridge.sh"
+if command -v python3 >/dev/null 2>&1; then
+  BRIDGE_CMD="python3 /workspace/pika-agent/pi-bridge.py"
+fi
+
+if [ -n "${{PIKA_MARMOTD_BIN:-}}" ] && [ -x "${{PIKA_MARMOTD_BIN}}" ]; then
+  "${{PIKA_MARMOTD_BIN}}" init --nsec "${{NOSTR_SECRET_KEY}}" --state-dir "$STATE_DIR" >/dev/null
+  exec "${{PIKA_MARMOTD_BIN}}" daemon {} --state-dir "$STATE_DIR" --auto-accept-welcomes --exec "$BRIDGE_CMD"
+fi
+
+PIKA_FLAKE_REF="${{PIKA_FLAKE_REF:-github:sledtools/pika}}"
+PIKA_DEV_SHELL="${{PIKA_DEV_SHELL:-default}}"
+src="/workspace/pika-agent/src"
+git_url="https://github.com/sledtools/pika.git"
+if [[ "$PIKA_FLAKE_REF" == github:* ]]; then
+  repo_ref="${{PIKA_FLAKE_REF#github:}}"
+  git_url="https://github.com/${{repo_ref}}.git"
+fi
+if [ ! -d "$src/.git" ]; then
+  rm -rf "$src"
+  git clone --depth 1 "$git_url" "$src"
+else
+  git -C "$src" fetch --depth 1 origin || true
+  git -C "$src" reset --hard origin/HEAD || true
+fi
+cd "$src"
+nix develop "$src#$PIKA_DEV_SHELL" -c cargo run -q -p marmotd -- init --nsec "${{NOSTR_SECRET_KEY}}" --state-dir "$STATE_DIR" >/dev/null
+exec nix develop "$src#$PIKA_DEV_SHELL" -c cargo run -q -p marmotd -- daemon {} --state-dir "$STATE_DIR" --auto-accept-welcomes --exec "$BRIDGE_CMD"
+"#,
+        exports.join("\n"),
+        relay_flags,
+        relay_flags
+    );
+
+    let remote_script = format!(
+        r#"AGENT_DIR=/workspace/pika-agent
+mkdir -p "$AGENT_DIR"
+cat > "$AGENT_DIR/pi-bridge.py" <<'PY'
+{PI_BRIDGE_PY}
+PY
+chmod 0755 "$AGENT_DIR/pi-bridge.py"
+
+cat > "$AGENT_DIR/pi-bridge.sh" <<'SH'
+{PI_BRIDGE_SH}
+SH
+chmod 0755 "$AGENT_DIR/pi-bridge.sh"
+
+cat > "$AGENT_DIR/run-agent.sh" <<'SH'
+{run_script}
+SH
+chmod 0755 "$AGENT_DIR/run-agent.sh"
+
+nohup bash "$AGENT_DIR/run-agent.sh" > "$AGENT_DIR/agent.log" 2>&1 < /dev/null &
+echo $! > "$AGENT_DIR/agent.pid"
+started=0
+for _ in $(seq 1 10); do
+  if kill -0 "$(cat "$AGENT_DIR/agent.pid")" >/dev/null 2>&1; then
+    started=1
+    break
+  fi
+  sleep 0.1
+done
+if [ "$started" -ne 1 ]; then
+  echo "agent process failed to start" >&2
+  tail -n 80 "$AGENT_DIR/agent.log" >&2 || true
+  exit 1
+fi
+"#
+    );
+
+    run_ssh_script(ip, user, port, key_path, jump_host, &remote_script).await
+}
+
+async fn cmd_agent_new(cli: &Cli, args: &AgentNewArgs) -> anyhow::Result<()> {
+    let anthropic_key =
+        std::env::var("ANTHROPIC_API_KEY").context("ANTHROPIC_API_KEY must be set")?;
+    let openai_key = std::env::var("OPENAI_API_KEY").ok();
+    let pi_model = std::env::var("PI_MODEL")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    let relays = resolve_relays(cli);
+
+    let provider = match args.provider {
+        AgentProviderArg::Fly => AgentProvider::Fly(FlyProvider {
+            client: fly_machines::FlyClient::from_env()?,
+        }),
+        AgentProviderArg::Microvm => AgentProvider::Microvm(MicrovmProvider {
+            client: microvm_spawner::MicrovmSpawnerClient::new(args.spawner_url.clone()),
+            ssh_jump: std::env::var("PIKA_MICROVM_SSH_JUMP")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .or_else(|| {
+                    if args.spawner_url.contains("127.0.0.1")
+                        || args.spawner_url.contains("localhost")
+                    {
+                        Some("pika-build".to_string())
+                    } else {
+                        None
+                    }
+                }),
+        }),
+    };
+
+    if matches!(args.provider, AgentProviderArg::Fly) && args.keep {
+        eprintln!("--keep has no effect for --provider fly.");
     }
 
     let (keys, mdk) = open(cli)?;
@@ -1253,299 +1754,195 @@ async fn cmd_agent_new(cli: &Cli, name: Option<&str>) -> anyhow::Result<()> {
     let bot_secret_hex = bot_keys.secret_key().to_secret_hex();
     eprintln!("Bot pubkey: {}", bot_pubkey.to_hex());
 
-    let suffix = format!("{:08x}", rand::random::<u32>());
-    let volume_name = format!("agent_{suffix}");
-    let machine_name = name
-        .map(std::string::ToString::to_string)
-        .unwrap_or_else(|| format!("agent-{suffix}"));
-
-    eprint!("Creating Fly volume...");
-    std::io::stderr().flush().ok();
-    let volume = fly.create_volume(&volume_name).await?;
-    eprintln!(" done ({})", volume.id);
-
-    let mut env = HashMap::new();
-    env.insert("STATE_DIR".to_string(), "/app/state".to_string());
-    env.insert("NOSTR_SECRET_KEY".to_string(), bot_secret_hex);
-    env.insert("ANTHROPIC_API_KEY".to_string(), anthropic_key);
-    if let Some(mode) = ui_mode.bridge_call_mode() {
-        env.insert("PI_BRIDGE_CALL_MODE".to_string(), mode.to_string());
-    }
-    if ui_mode == AgentUiMode::Nostr {
-        env.insert("PI_BRIDGE_RPC_TRANSPORT".to_string(), "nostr".to_string());
-    }
-    for key in ["PI_BRIDGE_REPLAY_FILE", "PI_BRIDGE_REPLAY_SPEED"] {
-        if let Ok(value) = std::env::var(key) {
-            let trimmed = value.trim();
-            if !trimmed.is_empty() {
-                env.insert(key.to_string(), trimmed.to_string());
-            }
-        }
-    }
-
-    eprint!("Creating Fly machine...");
-    std::io::stderr().flush().ok();
-    let machine = fly.create_machine(&machine_name, &volume.id, env).await?;
-    eprintln!(" done ({})", machine.id);
-
-    let client = client_all(cli, &keys).await?;
-    let relays = relay_util::parse_relay_urls(&resolve_relays(cli))?;
-
-    eprint!("Waiting for bot to publish key package");
-    std::io::stderr().flush().ok();
-    let start = tokio::time::Instant::now();
-    let timeout = Duration::from_secs(120);
-    let bot_kp = loop {
-        match relay_util::fetch_latest_key_package(
-            &client,
-            &bot_pubkey,
-            &relays,
-            Duration::from_secs(5),
-        )
-        .await
-        {
-            Ok(kp) => break kp,
-            Err(err) => {
-                if start.elapsed() >= timeout {
-                    client.shutdown().await;
-                    anyhow::bail!(
-                        "timed out waiting for bot key package after {}s: {err}",
-                        timeout.as_secs()
-                    );
-                }
-                eprint!(".");
-                std::io::stderr().flush().ok();
-                tokio::time::sleep(Duration::from_secs(3)).await;
-            }
-        }
+    let spawn = AgentSpawnConfig {
+        bot_secret_hex,
+        anthropic_key,
+        openai_key,
+        pi_model,
+        relays: relays.clone(),
     };
-    eprintln!(" done");
 
-    eprint!("Creating MLS group and inviting bot...");
-    std::io::stderr().flush().ok();
-    let config = NostrGroupConfigData::new(
-        "Agent Chat".to_string(),
-        String::new(),
-        None,
-        None,
-        None,
-        relays.clone(),
-        vec![keys.public_key(), bot_pubkey],
-    );
-    let result = mdk
-        .create_group(&keys.public_key(), vec![bot_kp], config)
-        .context("create group for bot")?;
-    let nostr_group_id_hex = hex::encode(result.group.nostr_group_id);
+    let runtime = provider.spawn(args, &spawn).await?;
+    let should_teardown = matches!(runtime, AgentRuntimeHandle::Microvm { .. }) && !args.keep;
+    let keypackage_timeout = provider.keypackage_timeout();
+    let keypackage_fetch_timeout = provider.keypackage_fetch_timeout();
+    let keypackage_retry_interval = provider.keypackage_retry_interval();
 
-    for rumor in result.welcome_rumors {
-        let giftwrap = EventBuilder::gift_wrap(&keys, &bot_pubkey, rumor, [])
+    let session_result = async {
+        let client = client_all(cli, &keys).await?;
+        let relays = relay_util::parse_relay_urls(&relays)?;
+
+        eprint!("Waiting for bot to publish key package");
+        std::io::stderr().flush().ok();
+        let start = tokio::time::Instant::now();
+        let bot_kp = loop {
+            match relay_util::fetch_latest_key_package(
+                &client,
+                &bot_pubkey,
+                &relays,
+                keypackage_fetch_timeout,
+            )
             .await
-            .context("build welcome giftwrap")?;
-        relay_util::publish_and_confirm(&client, &relays, &giftwrap, "welcome").await?;
-    }
-    eprintln!(" done");
-    client.shutdown().await;
+            {
+                Ok(kp) => break kp,
+                Err(err) => {
+                    if start.elapsed() >= keypackage_timeout {
+                        client.shutdown().await;
+                        anyhow::bail!(
+                            "timed out waiting for bot key package after {}s: {err}",
+                            keypackage_timeout.as_secs()
+                        );
+                    }
+                    eprint!(".");
+                    std::io::stderr().flush().ok();
+                    tokio::time::sleep(keypackage_retry_interval).await;
+                }
+            }
+        };
+        eprintln!(" done");
 
-    let relay_urls = resolve_relays(cli);
-    let moq_urls = resolve_agent_moq_urls();
-    match ui_mode {
-        AgentUiMode::Pty => launch_agent_pty_client(
-            &cli.state_dir,
-            &relay_urls,
-            &moq_urls,
-            &nostr_group_id_hex,
-            &bot_pubkey.to_hex(),
-            &machine.id,
-            fly.app_name(),
-        ),
-        AgentUiMode::Nostr => launch_agent_rpc_parity_ui(
-            &cli.state_dir,
-            &relay_urls,
-            &nostr_group_id_hex,
-            &bot_pubkey.to_hex(),
-            &machine.id,
-            fly.app_name(),
-            ui_mode,
-        ),
-        AgentUiMode::Rpc => launch_agent_rpc_parity_ui(
-            &cli.state_dir,
-            &relay_urls,
-            &nostr_group_id_hex,
-            &bot_pubkey.to_hex(),
-            &machine.id,
-            fly.app_name(),
-            ui_mode,
-        ),
-    }
-}
-
-fn resolve_agent_moq_urls() -> Vec<String> {
-    if let Ok(raw) = std::env::var("PIKA_AGENT_MOQ_URLS") {
-        let urls: Vec<String> = raw
-            .split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(ToOwned::to_owned)
-            .collect();
-        if !urls.is_empty() {
-            return urls;
-        }
-    }
-    DEFAULT_AGENT_MOQ_URLS
-        .iter()
-        .map(|s| s.to_string())
-        .collect()
-}
-
-fn resolve_agent_daemon_bin() -> anyhow::Result<PathBuf> {
-    if let Ok(path) = std::env::var("PIKA_AGENT_MARMOTD_BIN") {
-        let candidate = PathBuf::from(path);
-        if candidate.exists() {
-            return Ok(candidate);
-        }
-        anyhow::bail!(
-            "PIKA_AGENT_MARMOTD_BIN is set but does not exist: {}",
-            candidate.display()
+        eprint!("Creating MLS group and inviting bot...");
+        std::io::stderr().flush().ok();
+        let config = NostrGroupConfigData::new(
+            "Agent Chat".to_string(),
+            String::new(),
+            None,
+            None,
+            None,
+            relays.clone(),
+            vec![keys.public_key(), bot_pubkey],
         );
+        let result = mdk
+            .create_group(&keys.public_key(), vec![bot_kp], config)
+            .context("create group for bot")?;
+        let mls_group_id = result.group.mls_group_id.clone();
+        let nostr_group_id_hex = hex::encode(result.group.nostr_group_id);
+
+        for rumor in result.welcome_rumors {
+            let giftwrap = EventBuilder::gift_wrap(&keys, &bot_pubkey, rumor, [])
+                .await
+                .context("build welcome giftwrap")?;
+            relay_util::publish_and_confirm(&client, &relays, &giftwrap, "welcome").await?;
+        }
+        eprintln!(" done");
+
+        let group_filter = Filter::new()
+            .kind(Kind::MlsGroupMessage)
+            .custom_tag(SingleLetterTag::lowercase(Alphabet::H), &nostr_group_id_hex)
+            .since(Timestamp::now());
+        let sub = client.subscribe(group_filter, None).await?;
+        let mut rx = client.notifications();
+
+        let bot_npub = bot_pubkey
+            .to_bech32()
+            .unwrap_or_else(|_| bot_pubkey.to_hex().to_string());
+        eprintln!();
+        eprintln!("Connected to pi agent ({bot_npub})");
+        eprintln!("Type messages below. Ctrl-C to exit.");
+        eprintln!();
+
+        let mut stdin = tokio::io::BufReader::new(tokio::io::stdin()).lines();
+        eprint!("you> ");
+        std::io::stderr().flush().ok();
+
+        loop {
+            tokio::select! {
+                line = stdin.next_line() => {
+                    let Some(line) = line? else { break };
+                    let line = line.trim().to_string();
+                    if line.is_empty() {
+                        eprint!("you> ");
+                        std::io::stderr().flush().ok();
+                        continue;
+                    }
+
+                    let rumor = EventBuilder::new(Kind::ChatMessage, &line).build(keys.public_key());
+                    let msg_event = mdk.create_message(&mls_group_id, rumor).context("create chat message")?;
+                    relay_util::publish_and_confirm(&client, &relays, &msg_event, "chat").await?;
+                    eprint!("you> ");
+                    std::io::stderr().flush().ok();
+                }
+                notification = rx.recv() => {
+                    let notification = match notification {
+                        Ok(n) => n,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(_) => break,
+                    };
+                    let RelayPoolNotification::Event { subscription_id, event, .. } = notification else { continue };
+                    if subscription_id != sub.val {
+                        continue;
+                    }
+                    let event = *event;
+                    if event.kind != Kind::MlsGroupMessage {
+                        continue;
+                    }
+                    if let Ok(MessageProcessingResult::ApplicationMessage(msg)) =
+                        mdk.process_message(&event)
+                    {
+                        if msg.pubkey == bot_pubkey {
+                            eprint!("\r");
+                            println!("pi> {}", msg.content);
+                            println!();
+                            eprint!("you> ");
+                            std::io::stderr().flush().ok();
+                        }
+                    }
+                }
+                _ = tokio::signal::ctrl_c() => {
+                    break;
+                }
+            }
+        }
+
+        client.unsubscribe_all().await;
+        client.shutdown().await;
+        Ok::<(), anyhow::Error>(())
     }
+    .await;
 
-    let current_exe = std::env::current_exe().context("resolve pikachat binary path")?;
-
-    let mut sibling_pikachat = current_exe.clone();
-    sibling_pikachat.set_file_name("pikachat");
-    if sibling_pikachat.exists() {
-        return Ok(sibling_pikachat);
-    }
-
-    let mut sibling_marmotd = current_exe;
-    sibling_marmotd.set_file_name("marmotd");
-    if sibling_marmotd.exists() {
-        return Ok(sibling_marmotd);
-    }
-
-    for command in ["pikachat", "marmotd"] {
-        match std::process::Command::new(command)
-            .arg("--version")
-            .status()
-        {
-            Ok(status) if status.success() => return Ok(PathBuf::from(command)),
-            _ => {}
+    let mut teardown_error: Option<anyhow::Error> = None;
+    if should_teardown {
+        eprint!("Deleting microVM...");
+        std::io::stderr().flush().ok();
+        match provider.teardown(&runtime).await {
+            Ok(()) => eprintln!(" done"),
+            Err(err) => {
+                eprintln!(" failed");
+                eprintln!("Teardown error: {err}");
+                teardown_error = Some(err);
+            }
         }
     }
 
-    anyhow::bail!(
-        "could not find pikachat/marmotd binary (tried sibling {} and {}, then PATH). Build with `cargo build -p pikachat` or set PIKA_AGENT_MARMOTD_BIN",
-        sibling_pikachat.display(),
-        sibling_marmotd.display()
-    )
-}
-
-fn launch_agent_pty_client(
-    state_dir: &Path,
-    relay_urls: &[String],
-    moq_urls: &[String],
-    nostr_group_id_hex: &str,
-    bot_pubkey_hex: &str,
-    machine_id: &str,
-    fly_app_name: &str,
-) -> anyhow::Result<()> {
-    let script_path = PathBuf::from("tools/agent-pty/agent-pty-client.py");
-    if !script_path.exists() {
-        anyhow::bail!("missing {} (run from repo root)", script_path.display());
-    }
-    let marmotd_bin = resolve_agent_daemon_bin()?;
-
     eprintln!();
-    eprintln!("Launching PTY agent session...");
-    eprintln!("Machine {machine_id} is running in app {fly_app_name}.");
-    eprintln!("Stop with: fly machine stop {machine_id} -a {fly_app_name}");
-    eprintln!();
-
-    let mut cmd = std::process::Command::new("python3");
-    cmd.arg(&script_path);
-    cmd.env("PIKA_AGENT_MARMOTD_BIN", marmotd_bin);
-    cmd.env("PIKA_AGENT_STATE_DIR", state_dir);
-    cmd.env("PIKA_AGENT_GROUP_ID", nostr_group_id_hex);
-    cmd.env("PIKA_AGENT_BOT_PUBKEY", bot_pubkey_hex);
-    cmd.env("PIKA_AGENT_MACHINE_ID", machine_id);
-    cmd.env("PIKA_AGENT_FLY_APP_NAME", fly_app_name);
-    cmd.env("PIKA_AGENT_RELAYS_JSON", serde_json::to_string(relay_urls)?);
-    cmd.env("PIKA_AGENT_MOQ_URLS_JSON", serde_json::to_string(moq_urls)?);
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        let err = cmd.exec();
-        anyhow::bail!("failed to exec python3 {}: {err}", script_path.display());
-    }
-
-    #[cfg(not(unix))]
-    {
-        let status = cmd.status().context("launch agent tui")?;
-        if !status.success() {
-            anyhow::bail!("agent TUI exited with status {status}");
+    match &runtime {
+        AgentRuntimeHandle::Fly {
+            machine_id,
+            app_name,
+        } => {
+            eprintln!("Machine {machine_id} is still running.");
+            eprintln!("Stop with: fly machine stop {machine_id} -a {app_name}");
         }
-        Ok(())
-    }
-}
-
-fn launch_agent_rpc_parity_ui(
-    state_dir: &Path,
-    relay_urls: &[String],
-    nostr_group_id_hex: &str,
-    bot_pubkey_hex: &str,
-    machine_id: &str,
-    fly_app_name: &str,
-    ui_mode: AgentUiMode,
-) -> anyhow::Result<()> {
-    let script_path = PathBuf::from("tools/agent-rpc-parity-ui/agent-rpc-parity-ui.mjs");
-    if !script_path.exists() {
-        anyhow::bail!("missing {} (run from repo root)", script_path.display());
-    }
-    let marmotd_bin = resolve_agent_daemon_bin()?;
-    let moq_urls = resolve_agent_moq_urls();
-    let rpc_transport_mode = if ui_mode == AgentUiMode::Nostr {
-        "nostr"
-    } else {
-        "moq"
-    };
-
-    eprintln!();
-    eprintln!("Launching RPC parity agent session...");
-    eprintln!("Machine {machine_id} is running in app {fly_app_name}.");
-    eprintln!("Stop with: fly machine stop {machine_id} -a {fly_app_name}");
-    eprintln!();
-
-    let mut cmd = std::process::Command::new("node");
-    cmd.arg(&script_path);
-    cmd.env("PIKA_AGENT_MARMOTD_BIN", marmotd_bin);
-    cmd.env("PIKA_AGENT_STATE_DIR", state_dir);
-    cmd.env("PIKA_AGENT_GROUP_ID", nostr_group_id_hex);
-    cmd.env("PIKA_AGENT_BOT_PUBKEY", bot_pubkey_hex);
-    cmd.env("PIKA_AGENT_MACHINE_ID", machine_id);
-    cmd.env("PIKA_AGENT_FLY_APP_NAME", fly_app_name);
-    cmd.env("PIKA_AGENT_RELAYS_JSON", serde_json::to_string(relay_urls)?);
-    cmd.env(
-        "PIKA_AGENT_MOQ_URLS_JSON",
-        serde_json::to_string(&moq_urls)?,
-    );
-    cmd.env("PIKA_AGENT_RPC_TRANSPORT", rpc_transport_mode);
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        let err = cmd.exec();
-        anyhow::bail!("failed to exec node {}: {err}", script_path.display());
-    }
-
-    #[cfg(not(unix))]
-    {
-        let status = cmd.status().context("launch rpc parity ui")?;
-        if !status.success() {
-            anyhow::bail!("rpc parity UI exited with status {status}");
+        AgentRuntimeHandle::Microvm {
+            spawner_url,
+            vm_id,
+            ip,
+        } => {
+            if args.keep {
+                eprintln!("microVM {vm_id} is still running at {ip}.");
+                eprintln!("Inspect: curl {spawner_url}/vms/{vm_id}");
+                eprintln!("Delete:  curl -X DELETE {spawner_url}/vms/{vm_id}");
+            } else {
+                eprintln!("microVM {vm_id} has been deleted.");
+            }
         }
-        Ok(())
     }
+
+    session_result?;
+    if let Some(err) = teardown_error {
+        return Err(err);
+    }
+    Ok(())
 }
 
 fn cmd_messages(cli: &Cli, nostr_group_id_hex: &str, limit: usize) -> anyhow::Result<()> {

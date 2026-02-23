@@ -7,6 +7,7 @@ in
   imports = [
     (modulesPath + "/installer/scan/not-detected.nix")
     ../modules/base.nix
+    ../modules/microvm-host.nix
   ];
 
   networking.hostName = "pika-build";
