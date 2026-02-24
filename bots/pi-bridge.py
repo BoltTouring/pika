@@ -15,6 +15,7 @@ import os
 import pty
 import select
 import signal
+import shlex
 import struct
 import subprocess
 import sys
@@ -102,9 +103,31 @@ def emit_pi_event(group_id: str, payload: dict) -> None:
     )
 
 
+def build_publish_keypackage_cmd():
+    raw = os.environ.get("PI_RELAYS_JSON", "").strip()
+    if not raw:
+        return {"cmd": "publish_keypackage"}
+    try:
+        parsed = json.loads(raw)
+    except Exception as err:
+        log(f"invalid PI_RELAYS_JSON, ignoring: {err}")
+        return {"cmd": "publish_keypackage"}
+    if not isinstance(parsed, list):
+        return {"cmd": "publish_keypackage"}
+    relays = [str(item).strip() for item in parsed if str(item).strip()]
+    if not relays:
+        return {"cmd": "publish_keypackage"}
+    return {"cmd": "publish_keypackage", "relays": relays}
+
+
 def spawn_pi_rpc(label: str) -> subprocess.Popen[bytes]:
     env = os.environ.copy()
-    cmd = ["pi", "--mode", "rpc", "--no-session", "--provider", "anthropic"]
+    cmd = shlex.split(
+        os.environ.get(
+            "PI_CMD",
+            "pi --mode rpc --no-session --provider anthropic",
+        )
+    )
     model = os.environ.get("PI_MODEL")
     if model:
         cmd.extend(["--model", model])
@@ -981,8 +1004,7 @@ def main() -> None:
         if msg_type == "ready":
             my_pubkey = msg.get("pubkey")
             log(f"marmotd ready, pubkey={my_pubkey}")
-            send_to_marmotd({"cmd": "publish_keypackage"})
-            continue
+            send_to_marmotd(build_publish_keypackage_cmd())
 
         if msg_type == "call_invite_received":
             call_id = str(msg.get("call_id", ""))

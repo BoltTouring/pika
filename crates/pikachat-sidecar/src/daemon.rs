@@ -2142,6 +2142,24 @@ async fn publish_and_confirm_multi(
     ))
 }
 
+async fn publish_without_confirm_multi(
+    client: &Client,
+    relays: &[RelayUrl],
+    event: &Event,
+    label: &str,
+) -> anyhow::Result<()> {
+    let out = client
+        .send_event_to(relays.to_vec(), event)
+        .await
+        .with_context(|| format!("send_event_to failed ({label})"))?;
+    if out.success.is_empty() {
+        return Err(anyhow!(
+            "event publish had no successful relays ({label}): {out:?}"
+        ));
+    }
+    Ok(())
+}
+
 async fn stdout_writer(mut rx: mpsc::UnboundedReceiver<OutMsg>) -> anyhow::Result<()> {
     let mut stdout = tokio::io::stdout();
     while let Some(msg) = rx.recv().await {
@@ -2234,9 +2252,20 @@ pub async fn daemon_main(
         .first()
         .map(|s| s.as_str())
         .unwrap_or("ws://127.0.0.1:18080");
-    crate::check_relay_ready(primary_relay, Duration::from_secs(90))
-        .await
-        .with_context(|| format!("relay readiness check failed for {primary_relay}"))?;
+    let skip_ready_check = std::env::var("MARMOTD_SKIP_RELAY_READY_CHECK")
+        .ok()
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false);
+    if !skip_ready_check {
+        crate::check_relay_ready(primary_relay, Duration::from_secs(90))
+            .await
+            .with_context(|| format!("relay readiness check failed for {primary_relay}"))?;
+    }
 
     let keys = crate::load_or_create_keys(&state_dir.join("identity.json"))?;
     let pubkey_hex = keys.public_key().to_hex().to_lowercase();
@@ -2479,7 +2508,9 @@ pub async fn daemon_main(
                             }
                         };
 
-                        match publish_and_confirm_multi(&client, &selected, &ev, "keypackage").await {
+                        match publish_without_confirm_multi(&client, &selected, &ev, "keypackage")
+                            .await
+                        {
                             Ok(_relay_confirmed) => {
                                 out_tx.send(out_ok(request_id, Some(json!({"event_id": ev.id.to_hex()})))).ok();
                                 out_tx.send(OutMsg::KeypackagePublished { event_id: ev.id.to_hex() }).ok();

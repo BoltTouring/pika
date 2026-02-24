@@ -11,6 +11,7 @@ members = [
   "crates/pika-tls",
   "crates/rmp-cli",
   "crates/pika-server",
+  "crates/vm-spawner",
 ]
 
 [workspace.dependencies]

@@ -780,3 +780,59 @@ agent-replay-test RELAY_EU="wss://eu.nostr.pikachat.org" RELAY_US="wss://us-east
     export PIKA_AGENT_CAPTURE_STDOUT_PATH="$PWD/.tmp/agent-replay-capture.bin"; \
     export PIKA_AGENT_EXPECT_REPLAY_FILE="$PWD/tools/agent-pty/fixtures/replay-ui-smoke.json"; \
     just agent-fly-moq "{{ RELAY_EU }}" "{{ RELAY_US }}" "{{ MOQ_US }}" "{{ MOQ_EU }}"
+
+# Backward-compatible alias for Fly+MoQ agent flow.
+agent:
+    just agent-fly-moq
+
+# Run `pikachat agent new` against local vm-spawner (loads ANTHROPIC_API_KEY from .env).
+agent-microvm RELAY_PRIMARY="wss://us-east.nostr.pikachat.org" RELAY_FALLBACK="" SPAWNER_URL="http://127.0.0.1:8080" SPAWN_VARIANT="prebuilt-cow":
+    set -euo pipefail; \
+    spawner_url="{{ SPAWNER_URL }}"; \
+    spawn_variant="{{ SPAWN_VARIANT }}"; \
+    tunnel_socket="${TMPDIR:-/tmp}/pika-build-vmspawner.sock"; \
+    relay_args="--relay {{ RELAY_PRIMARY }}"; \
+    if [ -n "{{ RELAY_FALLBACK }}" ]; then \
+      relay_args="$relay_args --relay {{ RELAY_FALLBACK }}"; \
+    fi; \
+    if [ "$spawn_variant" != "prebuilt" ] && [ "$spawn_variant" != "prebuilt-cow" ]; then \
+      echo "error: SPAWN_VARIANT must be prebuilt or prebuilt-cow for MVP demo"; \
+      exit 1; \
+    fi; \
+    is_local_spawner=0; \
+    if [[ "$spawner_url" == "http://127.0.0.1:8080" || "$spawner_url" == "http://localhost:8080" ]]; then \
+      is_local_spawner=1; \
+    fi; \
+    health_ok=0; \
+    if curl -fsS "$spawner_url/healthz" >/dev/null; then \
+      health_ok=1; \
+    fi; \
+    if [ "$health_ok" -eq 0 ] && [ "$is_local_spawner" -eq 1 ]; then \
+      echo "vm-spawner tunnel not ready; starting SSH tunnel to pika-build..."; \
+      ssh -f -N -M -S "$tunnel_socket" -o ExitOnForwardFailure=yes -L 8080:127.0.0.1:8080 pika-build || true; \
+      for _ in $(seq 1 20); do \
+        if curl -fsS "$spawner_url/healthz" >/dev/null; then \
+          health_ok=1; \
+          break; \
+        fi; \
+        sleep 0.25; \
+      done; \
+    fi; \
+    if [ ! -f .env ]; then \
+      echo "error: missing .env in repo root"; \
+      exit 1; \
+    fi; \
+    if [ "$health_ok" -eq 0 ]; then \
+      echo "error: vm-spawner is not reachable at $spawner_url"; \
+      if [ "$is_local_spawner" -eq 1 ]; then \
+        echo "hint: verify SSH access to pika-build and rerun"; \
+      fi; \
+      exit 1; \
+    fi; \
+    set -a; \
+    source .env; \
+    set +a; \
+    cargo run -p pikachat -- $relay_args agent new \
+      --provider microvm \
+      --spawner-url {{ SPAWNER_URL }} \
+      --spawn-variant {{ SPAWN_VARIANT }}
