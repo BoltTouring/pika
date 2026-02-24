@@ -768,6 +768,10 @@ agent-fly-rpc:
     if [ -n "${FLY_BOT_IMAGE_RPC:-}" ]; then export FLY_BOT_IMAGE="$FLY_BOT_IMAGE_RPC"; export PIKA_AGENT_USE_PINNED_IMAGE=1; fi; \
     just agent-fly-moq wss://eu.nostr.pikachat.org wss://us-east.nostr.pikachat.org
 
+# Deploy the pika-bot Docker image to Fly.
+deploy-bot:
+    fly deploy -c fly.pika-bot.toml
+
 # Deterministic PTY replay smoke test over Fly + MoQ (non-interactive).
 agent-replay-test RELAY_EU="wss://eu.nostr.pikachat.org" RELAY_US="wss://us-east.nostr.pikachat.org" MOQ_US="https://us-east.moq.pikachat.org/anon" MOQ_EU="https://eu.moq.pikachat.org/anon":
     set -euo pipefail; \

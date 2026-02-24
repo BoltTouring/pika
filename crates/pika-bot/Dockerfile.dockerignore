@@ -1,0 +1,11 @@
+target/
+ios/
+android/
+.git/
+node_modules/
+*.xcodeproj/
+*.xcworkspace/
+.pgdata/
+secrets/
+worktrees/
+.tmp/
