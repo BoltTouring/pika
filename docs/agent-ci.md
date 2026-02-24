@@ -1,11 +1,3 @@
----
-summary: Deterministic CI lane policy for pikachat agent providers
-read_when:
-  - changing provider CI/workflow path filters
-  - updating pre-merge or nightly agent contract coverage
-  - debugging provider lane trigger behavior
----
-
 # Agent Provider CI Lanes
 
 This document defines deterministic CI coverage for `pikachat agent new` providers.
@@ -44,14 +36,3 @@ just pre-merge-workers
 # Full pre-merge lane for pikachat crate
 just pre-merge-pikachat
 ```
-
-## Trigger Sanity Checks
-
-Use these PR-change patterns to confirm path-filter behavior in GitHub Actions:
-
-- Touch `cli/src/fly_machines.rs`:
-  - expected: `check-agent-contracts` and `check-pikachat` run.
-- Touch `cli/src/main.rs` only:
-  - expected: `check-pikachat` runs; `check-agent-contracts` is skipped.
-- Touch `workers/**` only:
-  - expected: `check-workers` runs (plus any shared lanes selected by other touched paths).

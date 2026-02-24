@@ -68,15 +68,12 @@ jobs:
             agent_contracts:
               - 'Cargo.toml'
               - 'Cargo.lock'
-              - 'cli/Cargo.toml'
               - 'flake.nix'
               - 'flake.lock'
               - 'nix/**'
               - 'justfile'
               - '.github/workflows/pre-merge.yml'
-              - 'cli/src/fly_machines.rs'
-              - 'cli/src/microvm_spawner.rs'
-              - 'cli/src/agent/microvm.rs'
+              - 'cli/**'
               - 'docs/agent-ci.md'
             rmp:
               - 'Cargo.toml'
@@ -302,14 +299,6 @@ jobs:
       - name: Evaluate lane results
         run: |
           failed=""
-          echo "detect-changes outputs:"
-          echo "  pika=${{ needs.detect-changes.outputs.pika }}"
-          echo "  pikachat=${{ needs.detect-changes.outputs.pikachat }}"
-          echo "  agent_contracts=${{ needs.detect-changes.outputs.agent_contracts }}"
-          echo "  workers=${{ needs.detect-changes.outputs.workers }}"
-          echo "  rmp=${{ needs.detect-changes.outputs.rmp }}"
-          echo "  notifications=${{ needs.detect-changes.outputs.notifications }}"
-
           echo "Blocking deterministic lanes:"
           for lane in pika pikachat agent-contracts workers rmp notifications; do
             result=""
