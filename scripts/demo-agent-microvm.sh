@@ -49,8 +49,12 @@ fi
 cmd+=("$@")
 
 echo "Running microVM agent demo..."
-"${cmd[@]}"
-status=$?
+status=0
+if "${cmd[@]}"; then
+  status=0
+else
+  status=$?
+fi
 
 echo
 if [[ "$KEEP_VM" == "1" ]]; then

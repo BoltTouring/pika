@@ -3,13 +3,15 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-const CREATE_VM_TIMEOUT: Duration = Duration::from_secs(20);
+const DEFAULT_CREATE_VM_TIMEOUT_SECS: u64 = 60;
+const MIN_CREATE_VM_TIMEOUT_SECS: u64 = 10;
 const DELETE_VM_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone)]
 pub struct MicrovmSpawnerClient {
     client: reqwest::Client,
     base_url: String,
+    create_vm_timeout: Duration,
 }
 
 #[derive(Debug, Serialize)]
@@ -45,6 +47,7 @@ impl MicrovmSpawnerClient {
         Self {
             client: reqwest::Client::new(),
             base_url,
+            create_vm_timeout: create_vm_timeout(),
         }
     }
 
@@ -58,7 +61,7 @@ impl MicrovmSpawnerClient {
             .client
             .post(&url)
             .json(req)
-            .timeout(CREATE_VM_TIMEOUT)
+            .timeout(self.create_vm_timeout)
             .send()
             .await
             .context("send create vm request")?;
@@ -86,4 +89,13 @@ impl MicrovmSpawnerClient {
         }
         Ok(())
     }
+}
+
+fn create_vm_timeout() -> Duration {
+    let secs = std::env::var("PIKA_MICROVM_CREATE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_CREATE_VM_TIMEOUT_SECS)
+        .max(MIN_CREATE_VM_TIMEOUT_SECS);
+    Duration::from_secs(secs)
 }

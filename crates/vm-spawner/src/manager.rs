@@ -256,6 +256,7 @@ impl VmManager {
         let create_result = async {
             let mut phase_start = Instant::now();
             let runtime_ip = ip;
+            let mut runtime_status = "running";
 
             fs::create_dir_all(&definition_dir)
                 .with_context(|| format!("create definition dir {}", definition_dir.display()))?;
@@ -268,16 +269,16 @@ impl VmManager {
             timings.insert("ssh_keygen_ms".into(), to_ms(phase_start.elapsed()));
             phase_start = Instant::now();
 
-            let did_prewarm = self.ensure_devshell_warmed(&flake_ref, &dev_shell).await?;
-            timings.insert("devshell_prewarm_ms".into(), to_ms(phase_start.elapsed()));
-            timings.insert(
-                "devshell_prewarm_cache_hit".into(),
-                if did_prewarm { 0 } else { 1 },
-            );
-            phase_start = Instant::now();
-
             match variant {
                 SpawnVariant::Legacy => {
+                    let did_prewarm = self.ensure_devshell_warmed(&flake_ref, &dev_shell).await?;
+                    timings.insert("devshell_prewarm_ms".into(), to_ms(phase_start.elapsed()));
+                    timings.insert(
+                        "devshell_prewarm_cache_hit".into(),
+                        if did_prewarm { 0 } else { 1 },
+                    );
+                    phase_start = Instant::now();
+
                     write_vm_flake(
                         &definition_dir,
                         &id,
@@ -329,6 +330,9 @@ impl VmManager {
                     timings.insert("service_start_ms".into(), to_ms(phase_start.elapsed()));
                 }
                 SpawnVariant::Prebuilt | SpawnVariant::PrebuiltCow => {
+                    timings.insert("devshell_prewarm_ms".into(), 0);
+                    timings.insert("devshell_prewarm_cache_hit".into(), 1);
+
                     fs::create_dir_all(&vm_state_dir).with_context(|| {
                         format!("create vm state dir {}", vm_state_dir.display())
                     })?;
@@ -382,16 +386,25 @@ impl VmManager {
                         "start microvm service",
                     )
                     .await?;
+                    if !wait_for_unit_active_or_fail_fast(
+                        &self.cfg.systemctl_cmd,
+                        &format!("microvm@{id}.service"),
+                        Duration::from_secs(2),
+                    )
+                    .await?
+                    {
+                        runtime_status = "starting";
+                    }
                     timings.insert("service_start_ms".into(), to_ms(phase_start.elapsed()));
                 }
             }
 
-            Ok::<Ipv4Addr, anyhow::Error>(runtime_ip)
+            Ok::<(Ipv4Addr, &'static str), anyhow::Error>((runtime_ip, runtime_status))
         }
         .await;
 
         match create_result {
-            Ok(runtime_ip) => {
+            Ok((runtime_ip, runtime_status)) => {
                 timings.insert("create_total_ms".into(), to_ms(total_started.elapsed()));
                 let mut guard = self.inner.lock().await;
                 let vm_snapshot = {
@@ -400,7 +413,7 @@ impl VmManager {
                         .get_mut(&id)
                         .ok_or_else(|| anyhow!("vm disappeared during create"))?;
                     vm.ip = runtime_ip.to_string();
-                    vm.status = "running".into();
+                    vm.status = runtime_status.into();
                     self.persist_vm(vm)?;
                     vm.clone()
                 };
@@ -1642,6 +1655,30 @@ async fn wait_for_unit_active(
     Err(anyhow!("timed out waiting for unit active: {unit}"))
 }
 
+async fn wait_for_unit_active_or_fail_fast(
+    systemctl_cmd: &str,
+    unit: &str,
+    timeout: Duration,
+) -> anyhow::Result<bool> {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        match unit_active_state(systemctl_cmd, unit).await.as_deref() {
+            Some("active") => return Ok(true),
+            Some("failed") => return Err(anyhow!("unit {unit} entered failed state after start")),
+            _ => {}
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    if matches!(
+        unit_active_state(systemctl_cmd, unit).await.as_deref(),
+        Some("failed")
+    ) {
+        return Err(anyhow!("unit {unit} entered failed state after start"));
+    }
+    Ok(false)
+}
+
 async fn unit_is_active(systemctl_cmd: &str, unit: &str) -> bool {
     Command::new(systemctl_cmd)
         .arg("is-active")
@@ -1651,6 +1688,22 @@ async fn unit_is_active(systemctl_cmd: &str, unit: &str) -> bool {
         .await
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+async fn unit_active_state(systemctl_cmd: &str, unit: &str) -> Option<String> {
+    let output = Command::new(systemctl_cmd)
+        .arg("show")
+        .arg("-p")
+        .arg("ActiveState")
+        .arg("--value")
+        .arg(unit)
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 fn remove_path_if_exists(path: &Path) -> anyhow::Result<()> {
