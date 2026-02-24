@@ -1877,13 +1877,11 @@ impl AppCore {
             b.creating_account = false;
         });
 
-        if let Err(e) = self.start_bunker_signer_session(bunker_uri, Keys::generate()) {
-            self.clear_busy();
-            self.toast(format!("{e:#}"));
-            return;
-        }
-
+        // Clear busy before session start (same rationale as Login).
         self.clear_busy();
+        if let Err(e) = self.start_bunker_signer_session(bunker_uri, Keys::generate()) {
+            self.toast(format!("{e:#}"));
+        }
     }
 
     fn begin_nostr_connect_login(&mut self) {
@@ -2001,15 +1999,15 @@ impl AppCore {
         );
 
         tracing::info!("nostr_connect: starting bunker signer session");
+        // Clear busy before session start (same rationale as Login).
+        self.clear_busy();
         if let Err(e) = self.start_bunker_signer_session(bunker_uri, client_keys) {
             tracing::error!(%e, "nostr_connect: bunker session failed");
-            self.clear_busy();
             self.toast(format!("{e:#}"));
             return;
         }
 
         tracing::info!("nostr_connect: login complete");
-        self.clear_busy();
     }
 
     fn on_nostr_connect_callback(&mut self, url: String) {
@@ -2107,13 +2105,11 @@ impl AppCore {
             return;
         }
 
-        if let Err(e) = self.start_external_signer_session(pubkey, signer_package, current_user) {
-            self.clear_busy();
-            self.toast(format!("{e:#}"));
-            return;
-        }
-
+        // Clear busy before session start (same rationale as Login).
         self.clear_busy();
+        if let Err(e) = self.start_external_signer_session(pubkey, signer_package, current_user) {
+            self.toast(format!("{e:#}"));
+        }
     }
 
     fn push_screen(&mut self, screen: Screen) {
@@ -3254,13 +3250,12 @@ impl AppCore {
 
                 self.emit_account_created(nsec, pubkey.clone(), npub.clone());
 
+                // Clear busy before session start (same rationale as Login).
+                self.clear_busy();
                 if let Err(e) = self.start_session(keys) {
                     // Include the full anyhow context chain; this is critical for diagnosing
                     // keyring/SQLCipher issues on iOS.
-                    self.clear_busy();
                     self.toast(format!("Create account failed: {e:#}"));
-                } else {
-                    self.clear_busy();
                 }
             }
             AppAction::Login { nsec } | AppAction::RestoreSession { nsec } => {
