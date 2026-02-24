@@ -50,8 +50,6 @@ info:
     @echo "    just agent-cf"
     @echo "  MicroVM demo:"
     @echo "    just agent-microvm"
-    @echo "  MicroVM tunnel (required unless local spawner is running):"
-    @echo "    just agent-microvm-tunnel"
     @echo "  Local worker dev:"
     @echo "    just agent-workers"
     @echo
@@ -784,10 +782,6 @@ agent-microvm *ARGS="":
       set +a; \
     fi; \
     ./scripts/demo-agent-microvm.sh {{ ARGS }}
-
-# Open local port-forward to remote vm-spawner (`http://127.0.0.1:8080`).
-agent-microvm-tunnel:
-    nix develop .#infra -c just -f infra/justfile build-vmspawner-tunnel
 
 # Deploy the pika-bot Docker image to Fly.
 deploy-bot:
