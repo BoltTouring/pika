@@ -59,6 +59,8 @@ secrets/.zapstore-sign-with.*
 .pika-agent-control-state.json
 .pgdata/
 .pika-cli/
+.tmp/
+cmd/pika-relay/data/
 bots/__pycache__/
 tools/agent-pty/__pycache__/
 
