@@ -1,98 +1,93 @@
 # Marmot Refactor Plan (Branch: `marmot-refactor`)
 
-## Decision Update (ACP-only)
-- Keep the current branch and Phase 1 extraction work.
-- Do **not** run dual protocol paths (`pi` + `acp`) going forward.
-- Standardize internal RPC layer to **ACP-only** in this refactor.
+## Decision Update
+- Keep Phase 1 and current Phase 2 work.
+- Do not revert.
+- Internal RPC remains ACP-only.
+- Temporarily freeze Cloudflare Workers to increase delivery speed on Fly + MicroVM.
 
-## Current State (as of now)
-- Phase 1 (control-plane crate extraction) is in place on this branch.
-- Phase 2 is now implemented ACP-only in Rust control-plane/CLI protocol paths:
-  - `crates/pika-agent-protocol` is ACP-only.
-  - `cli` `agent new` path provisions ACP only (no PI protocol switch/default).
-  - `crates/pika-agent-control-plane` + `pika-server` protocol kind usage is ACP-only.
-- Remaining PI text/legacy behavior may still exist outside Phase 2 scope (for example, workers runtime internals), to be removed in PR3.
+## Current State
+- Phase 1 (control-plane schema extraction) is complete.
+- Phase 2 (ACP-only protocol cut in Rust/CLI/control-plane) is largely complete.
+- Remaining cleanup/hardening is required before moving deeper:
+  - control-plane persisted-state compatibility for prior PI protocol values
+  - CLI `--brain` semantics cleanup in `agent new`
 
-## Should We Revert?
-No.
+## Priority Order (Updated)
+1. Finish Phase 2 hardening.
+2. Insert and land Workers freeze phase.
+3. Continue remaining refactor phases on ACP/Fly/MicroVM only.
 
-Rationale:
-- Phase 1 changes are orthogonal and useful regardless of protocol choice.
-- Reverting now burns time and creates churn with little risk reduction.
-- The right move is to pivot immediately while Phase 2 is still early.
+## Execution Plan
 
-## New Execution Plan
-
-### PR1 (already done on branch): Control-plane schema crate
+### PR1 (Done): Control-plane schema crate extraction
 - `crates/pika-agent-control-plane` extracted.
 - `pika-server -> cli` dependency edge removed.
 
-### PR1.1 (quick follow-up before deeper refactor)
-Restore lost/critical provider-client contract tests in `pika-server` local client modules (or move shared client code into its own crate/module with tests retained).
+### PR1.1 (Open): provider-client contract tests
+- Restore/retain provider client request/response contract tests in server-owned client modules (or centralize shared client code with tests).
 
 Acceptance:
-- Request/response shape tests exist for Fly + MicroVM + Workers client adapters used by server.
+- Contract tests for Fly + MicroVM + Workers client adapters used by `pika-server`.
 
-### PR2 (REPLACED): Protocol core import + ACP-only cut
-Bring in/keep `crates/pika-agent-protocol`, but make it ACP-only now.
-
-Tasks:
-- In `crates/pika-agent-protocol`:
-  - Remove `AgentProtocol::Pi`.
-  - Remove PI-specific parsing/session helpers.
-  - Keep ACP envelope + session + parser as source of truth.
-- In CLI:
-  - Remove PI protocol options and PI-only harness/session branches.
-  - Keep ACP-only path in runtime/harness/session.
-- In control-plane schema:
-  - Deprecate then remove `ProtocolKind::Pi` in same PR if feasible.
+### PR2 (Done): ACP-only protocol cut (Rust/CLI/control-plane)
+- `crates/pika-agent-protocol` is ACP-only.
+- CLI no longer uses PI protocol switching for control-plane provisioning.
+- `ProtocolKind` is ACP-only in control-plane schema.
 
 Acceptance:
-- No internal Rust code path can emit or accept protocol `pi`.
-- Protocol crate tests pass ACP-only.
-- Status: complete on this branch.
+- No `AgentProtocol::Pi` in Rust.
+- No `ProtocolKind::Pi` in control-plane schema.
 
-### PR3: Workers + wasm ACP-only
+### PR2.1 (Required next): Phase 2 hardening
 Tasks:
-- In `crates/pikachat-wasm`:
-  - Remove PI adapter response exports/functions.
-  - Keep ACP parsing/encoding exports.
-- In workers runtime wrappers and worker app:
-  - Remove PI adapter env vars/branches/parsers.
-  - Use ACP-only decode/encode/parse through wasm wrapper.
-- Remove `brain=pi` assumptions; make ACP the only runtime protocol path.
+- Add backward-compat handling for persisted control-plane state containing historical PI protocol values.
+- Fix/clarify `agent new --brain` behavior:
+  - either remove/disable options that no longer affect provisioning behavior,
+  - or wire behavior explicitly and document it.
 
 Acceptance:
-- Workers path has no PI parser logic.
-- Worker tests/smokes run ACP-only.
+- Server state load does not drop runtimes on protocol decode mismatch from legacy state.
+- CLI agent-new surface has no misleading protocol/brain semantics.
 
-### PR4: Runtime helper extraction (`pika-marmot-runtime`)
+### PR2.2 (New): Workers freeze
 Tasks:
-- Extract shared helpers used by CLI + sidecar + harness:
+- Disable Workers provider path for now in CLI/server with explicit, user-facing "temporarily disabled" errors.
+- Stop treating Workers as active execution target in plan/CI/smokes/docs.
+- Keep code in tree behind freeze guard (no full deletion in this phase).
+
+Acceptance:
+- `agent new --provider workers` fails fast with intentional message.
+- Active CI/smokes for this refactor do not depend on Workers.
+- Fly + MicroVM flow remains intact.
+
+### PR3: Runtime helper extraction (`pika-marmot-runtime`) for ACP/Fly/MicroVM
+Tasks:
+- Extract shared helpers for CLI + sidecar + harness:
   - identity bootstrap
   - MDK open/new helpers
   - processed-event dedupe persistence
-- Replace duplicate implementations.
+- Replace duplicated implementations.
 
 Acceptance:
 - No duplicate `load_or_create_keys` / `new_mdk` across CLI, sidecar, harness.
 
-### PR5: Shared welcome/message ingest primitives
+### PR4: Shared welcome/message ingest primitives
 Tasks:
 - Extract and reuse welcome + message ingest primitives in CLI and sidecar.
 
 Acceptance:
-- CLI and sidecar share common ingest logic, with parity tests.
+- CLI and sidecar share common ingest logic with parity tests.
 
-### PR6: MicroVM provider extraction
+### PR5: MicroVM provider extraction
 Tasks:
 - Create `crates/pika-agent-microvm`.
-- Move shared microvm provisioning/default/script building logic from CLI + server.
+- Move shared microvm provisioning/default/script generation from CLI + server.
 
 Acceptance:
 - No copy-pasted microvm provisioning/scripts across CLI and server.
 
-### PR7: Relay/default profile normalization
+### PR6: Relay/default profile normalization
 Tasks:
 - Centralize defaults into explicit profiles.
 - Replace per-component hardcoded relay defaults where appropriate.
@@ -100,37 +95,44 @@ Tasks:
 Acceptance:
 - Defaults are intentional and centrally defined.
 
-### PR8 (optional): `mdk_support` convergence (app + NSE)
-Only after core refactor stabilizes.
+### PR7 (Optional): `mdk_support` convergence (app + NSE)
+- Only after core refactor stabilizes.
+
+## Workers Re-entry (Later)
+When Fly + MicroVM + ACP core stabilize, decide one of:
+1. Re-enable Workers on top of shared ACP core, and remove legacy `brain` request fields from Workers APIs/state (or map them internally as deprecated aliases during a short migration window).
+2. Remove Workers code entirely if still not needed, including all remaining Workers-specific `brain` fields/usages.
 
 ## Immediate Next Steps for Coding Agent
-1. Finish/stabilize current staged Phase 2 scaffold (add/commit file set cleanly).
-2. Execute PR2 as ACP-only protocol cut **before** more worker/runtime wiring.
-3. Execute PR3 immediately after PR2 to eliminate remaining PI branches in JS/wasm layer.
+1. Land PR2.1 hardening.
+2. Land PR2.2 Workers freeze.
+3. Continue with PR3 (runtime helper extraction) on ACP/Fly/MicroVM only.
 
-## ACP-only Guardrails (must hold after PR3)
-- No `AgentProtocol::Pi` in Rust.
+## Guardrails
+- No `AgentProtocol::Pi` in Rust protocol core.
 - No `ProtocolKind::Pi` in control-plane schema.
-- No `parse_pi_*` functions in shared protocol/wasm exports.
-- No `PI_ADAPTER_*` env contract in workers/runtime bridge (use ACP equivalents only).
-- No `brain=pi` runtime branch in workers provider code.
+- No PI protocol defaults in CLI control-plane flows.
+- Workers is frozen (explicitly disabled) until re-entry decision.
 
 ## Test Strategy
 Per PR:
 - `cargo test -p pika-agent-control-plane`
 - `cargo test -p pika-agent-protocol`
-- `cargo test -p pikachat-wasm`
-- `cargo test -p pikachat-sidecar`
 - `cargo test -p pikachat`
-- targeted `pika-server` tests for control-plane + provider adapters
+- `cargo check -p pika-server`
+- `cargo test -p pikachat-sidecar` (when touched)
+- `cargo test -p pikachat-wasm` (when touched)
 
-Smokes:
-- CLI smoke
-- worker ACP smoke
+Smokes (active):
 - control-plane local demo
+- Fly path smoke
+- MicroVM path smoke
+
+Smokes (paused during freeze):
+- Workers-specific smoke jobs
 
 ## Done Criteria
 - ACP is the sole internal RPC protocol.
-- Shared crates own protocol + runtime helper core.
-- CLI, sidecar, workers, server consume shared core without PI fallback branches.
-- Duplicate Marmot logic removed or consolidated with tests.
+- Shared crates own protocol/runtime helper core.
+- Fly + MicroVM are stable on shared ACP-first architecture.
+- Workers either re-enabled cleanly on shared core or deliberately removed later.
