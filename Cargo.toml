@@ -4,6 +4,7 @@ members = [
   "rust",
   "uniffi-bindgen",
   "cli",
+  "crates/pika-agent-protocol",
   "crates/pika-agent-control-plane",
   "crates/pikachat-sidecar",
   "crates/pika-desktop",

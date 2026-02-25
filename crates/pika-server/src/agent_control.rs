@@ -1565,7 +1565,7 @@ impl ProviderAdapter for FlyAdapter {
             region: profile.region,
             capacity: profile.capacity,
             policy_constraints: profile.policy_constraints,
-            protocol_compatibility: vec![ProtocolKind::Pi],
+            protocol_compatibility: vec![ProtocolKind::Acp],
         })
     }
 
@@ -1631,7 +1631,7 @@ impl ProviderAdapter for WorkersAdapter {
         let mut status = workers
             .create_agent(&CreateAgentRequest {
                 name: Some(agent_name),
-                brain: "pi".to_string(),
+                brain: "acp".to_string(),
                 relay_urls,
                 bot_secret_key_hex: Some(bot_secret),
             })
@@ -1671,7 +1671,7 @@ impl ProviderAdapter for WorkersAdapter {
             region: profile.region,
             capacity: profile.capacity,
             policy_constraints: profile.policy_constraints,
-            protocol_compatibility: vec![ProtocolKind::Pi, ProtocolKind::Acp],
+            protocol_compatibility: vec![ProtocolKind::Acp],
         })
     }
 
@@ -1800,7 +1800,7 @@ impl ProviderAdapter for MicrovmAdapter {
             region: profile.region,
             capacity: profile.capacity,
             policy_constraints: profile.policy_constraints,
-            protocol_compatibility: vec![ProtocolKind::Pi, ProtocolKind::Acp],
+            protocol_compatibility: vec![ProtocolKind::Acp],
         })
     }
 
@@ -1920,11 +1920,8 @@ fn provider_name(provider: ProviderKind) -> &'static str {
     }
 }
 
-fn protocol_name(protocol: ProtocolKind) -> &'static str {
-    match protocol {
-        ProtocolKind::Pi => "pi",
-        ProtocolKind::Acp => "acp",
-    }
+fn protocol_name(_protocol: ProtocolKind) -> &'static str {
+    "acp"
 }
 
 fn should_cache_success_result(command: &AgentControlCommand) -> bool {
@@ -2138,7 +2135,7 @@ mod tests {
                 region: Some("local".to_string()),
                 capacity: json!({"slots": 1}),
                 policy_constraints: json!({"allow_keep": true}),
-                protocol_compatibility: vec![ProtocolKind::Pi],
+                protocol_compatibility: vec![ProtocolKind::Acp],
             })
         }
 
@@ -2274,7 +2271,7 @@ mod tests {
                 requester,
                 request(AgentControlCommand::Provision(ProvisionCommand {
                     provider: ProviderKind::Fly,
-                    protocol: ProtocolKind::Pi,
+                    protocol: ProtocolKind::Acp,
                     name: None,
                     runtime_class: None,
                     relay_urls: vec![],
@@ -2293,7 +2290,7 @@ mod tests {
                 requester,
                 request(AgentControlCommand::Provision(ProvisionCommand {
                     provider: ProviderKind::Fly,
-                    protocol: ProtocolKind::Pi,
+                    protocol: ProtocolKind::Acp,
                     name: None,
                     runtime_class: None,
                     relay_urls: vec![],
@@ -2355,7 +2352,7 @@ mod tests {
                         idem,
                         AgentControlCommand::Provision(ProvisionCommand {
                             provider,
-                            protocol: ProtocolKind::Pi,
+                            protocol: ProtocolKind::Acp,
                             name: None,
                             runtime_class: None,
                             relay_urls: vec![],
@@ -2378,7 +2375,7 @@ mod tests {
                     "idem-list",
                     AgentControlCommand::ListRuntimes(ListRuntimesCommand {
                         provider: Some(ProviderKind::Workers),
-                        protocol: Some(ProtocolKind::Pi),
+                        protocol: Some(ProtocolKind::Acp),
                         lifecycle_phase: Some(RuntimeLifecyclePhase::Ready),
                         runtime_class: Some("mock".to_string()),
                         limit: Some(10),
@@ -2416,7 +2413,7 @@ mod tests {
                 requester,
                 request(AgentControlCommand::Provision(ProvisionCommand {
                     provider: ProviderKind::Fly,
-                    protocol: ProtocolKind::Pi,
+                    protocol: ProtocolKind::Acp,
                     name: None,
                     runtime_class: Some("not-fly".to_string()),
                     relay_urls: vec![],
@@ -2451,7 +2448,7 @@ mod tests {
                 requester,
                 request(AgentControlCommand::Provision(ProvisionCommand {
                     provider: ProviderKind::Fly,
-                    protocol: ProtocolKind::Pi,
+                    protocol: ProtocolKind::Acp,
                     name: None,
                     runtime_class: None,
                     relay_urls: vec![],
@@ -2481,7 +2478,7 @@ mod tests {
             provision_calls: provision_calls.clone(),
             teardown_calls: teardown_calls.clone(),
             runtime_class: Some(format!("{requested_class}-actual")),
-            protocol_compatibility: vec![ProtocolKind::Pi],
+            protocol_compatibility: vec![ProtocolKind::Acp],
         });
         let service = AgentControlService::with_adapters(adapter.clone(), adapter.clone(), adapter);
         let requester = Keys::generate().public_key();
@@ -2492,7 +2489,7 @@ mod tests {
                 requester,
                 request(AgentControlCommand::Provision(ProvisionCommand {
                     provider: ProviderKind::Fly,
-                    protocol: ProtocolKind::Pi,
+                    protocol: ProtocolKind::Acp,
                     name: None,
                     runtime_class: Some(requested_class),
                     relay_urls: vec![],
@@ -2527,7 +2524,7 @@ mod tests {
                 owner,
                 request(AgentControlCommand::Provision(ProvisionCommand {
                     provider: ProviderKind::Fly,
-                    protocol: ProtocolKind::Pi,
+                    protocol: ProtocolKind::Acp,
                     name: None,
                     runtime_class: None,
                     relay_urls: vec![],
@@ -2578,7 +2575,7 @@ mod tests {
                     "idem-1",
                     AgentControlCommand::Provision(ProvisionCommand {
                         provider: ProviderKind::Workers,
-                        protocol: ProtocolKind::Pi,
+                        protocol: ProtocolKind::Acp,
                         name: None,
                         runtime_class: None,
                         relay_urls: vec![],
@@ -2621,7 +2618,7 @@ mod tests {
         let requester = Keys::generate().public_key();
         let cmd = request(AgentControlCommand::Provision(ProvisionCommand {
             provider: ProviderKind::Workers,
-            protocol: ProtocolKind::Pi,
+            protocol: ProtocolKind::Acp,
             name: None,
             runtime_class: None,
             relay_urls: vec![],
@@ -2669,7 +2666,7 @@ mod tests {
                 denied,
                 request(AgentControlCommand::Provision(ProvisionCommand {
                     provider: ProviderKind::Workers,
-                    protocol: ProtocolKind::Pi,
+                    protocol: ProtocolKind::Acp,
                     name: None,
                     runtime_class: None,
                     relay_urls: vec![],
@@ -2714,7 +2711,7 @@ mod tests {
                         &idem,
                         AgentControlCommand::Provision(ProvisionCommand {
                             provider: ProviderKind::Fly,
-                            protocol: ProtocolKind::Pi,
+                            protocol: ProtocolKind::Acp,
                             name: None,
                             runtime_class: None,
                             relay_urls: vec![],
@@ -2769,7 +2766,7 @@ mod tests {
                         region: Some("local".to_string()),
                         capacity: json!({"slots": 1}),
                         policy_constraints: Value::Null,
-                        protocol_compatibility: vec![ProtocolKind::Pi],
+                        protocol_compatibility: vec![ProtocolKind::Acp],
                         bot_pubkey: Some("ab".repeat(32)),
                         metadata: Value::Null,
                     },
@@ -2831,7 +2828,7 @@ mod tests {
                     region: Some("local".to_string()),
                     capacity: json!({"slots": 1}),
                     policy_constraints: Value::Null,
-                    protocol_compatibility: vec![ProtocolKind::Pi],
+                    protocol_compatibility: vec![ProtocolKind::Acp],
                     bot_pubkey: Some("ab".repeat(32)),
                     metadata: Value::Null,
                 },
@@ -2904,7 +2901,7 @@ mod tests {
                         region: Some("local".to_string()),
                         capacity: json!({"slots": 1}),
                         policy_constraints: Value::Null,
-                        protocol_compatibility: vec![ProtocolKind::Pi],
+                        protocol_compatibility: vec![ProtocolKind::Acp],
                         bot_pubkey: Some("ab".repeat(32)),
                         metadata: Value::Null,
                     },

@@ -5806,6 +5806,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "pika-agent-protocol"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "rand 0.8.5",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "pika-desktop"
 version = "0.1.0"
 dependencies = [
@@ -5951,6 +5962,7 @@ dependencies = [
  "nostr-blossom",
  "nostr-sdk",
  "pika-agent-control-plane",
+ "pika-agent-protocol",
  "pikachat-sidecar",
  "rand 0.8.5",
  "reqwest",

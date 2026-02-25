@@ -22,7 +22,6 @@ pub enum ProviderKind {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProtocolKind {
-    Pi,
     Acp,
 }
 
@@ -267,7 +266,7 @@ mod tests {
             "idem-1".to_string(),
             AgentControlCommand::Provision(ProvisionCommand {
                 provider: ProviderKind::Workers,
-                protocol: ProtocolKind::Pi,
+                protocol: ProtocolKind::Acp,
                 name: Some("agent".to_string()),
                 runtime_class: Some("workers-us-east".to_string()),
                 relay_urls: vec!["wss://us-east.nostr.pikachat.org".to_string()],
@@ -286,7 +285,7 @@ mod tests {
         match decoded.command {
             AgentControlCommand::Provision(provision) => {
                 assert_eq!(provision.provider, ProviderKind::Workers);
-                assert_eq!(provision.protocol, ProtocolKind::Pi);
+                assert_eq!(provision.protocol, ProtocolKind::Acp);
             }
             _ => panic!("expected provision command"),
         }
@@ -304,7 +303,7 @@ mod tests {
                 region: Some("us-east".to_string()),
                 capacity: json!({"slots": 12}),
                 policy_constraints: json!({"allow_keep": true}),
-                protocol_compatibility: vec![ProtocolKind::Pi, ProtocolKind::Acp],
+                protocol_compatibility: vec![ProtocolKind::Acp],
                 bot_pubkey: Some("ab".repeat(32)),
                 metadata: json!({"vm_id":"vm-123"}),
             },
@@ -321,7 +320,7 @@ mod tests {
         assert_eq!(decoded.runtime.provider, ProviderKind::Microvm);
         assert_eq!(
             decoded.runtime.protocol_compatibility,
-            vec![ProtocolKind::Pi, ProtocolKind::Acp]
+            vec![ProtocolKind::Acp]
         );
     }
 }
