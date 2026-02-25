@@ -5963,6 +5963,7 @@ dependencies = [
  "nostr-sdk",
  "paranoid-android",
  "pika-media",
+ "pika-relay-profiles",
  "pika-tls",
  "rand 0.8.5",
  "reqwest",
@@ -6875,6 +6876,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "pika-relay-profiles",
  "serde",
  "serde_json",
  "tempfile",

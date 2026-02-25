@@ -2,32 +2,15 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use nostr_sdk::prelude::{RelayUrl, Url};
+use pika_relay_profiles::{
+    app_default_blossom_servers, app_default_key_package_relays, app_default_message_relays,
+};
 use serde::Deserialize;
 
 use super::AppCore;
 
-// "Popular ones" per user request; keep small for MVP.
-const DEFAULT_RELAY_URLS: &[&str] = &[
-    "wss://relay.damus.io",
-    "wss://relay.primal.net",
-    "wss://nos.lol",
-];
-
-// Key packages (kind 443) are NIP-70 "protected" in modern MDK.
-// Many popular relays (incl. Damus/Primal/nos.lol) currently reject protected events.
-// Default these to relays that accept protected kind 443 publishes (manual probe).
-const DEFAULT_KEY_PACKAGE_RELAY_URLS: &[&str] = &[
-    "wss://nostr-pub.wellorder.net",
-    "wss://nostr-01.yakihonne.com",
-    "wss://nostr-02.yakihonne.com",
-];
 const DEFAULT_CALL_MOQ_URL: &str = "https://us-east.moq.logos.surf/anon";
 const DEFAULT_CALL_BROADCAST_PREFIX: &str = "pika/calls";
-
-const DEFAULT_BLOSSOM_SERVERS: &[&str] = &[
-    "https://us-east.nostr.pikachat.org",
-    "https://eu.nostr.pikachat.org",
-];
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
@@ -54,9 +37,11 @@ pub(super) fn load_app_config(data_dir: &str) -> AppConfig {
 }
 
 pub(super) fn default_app_config_json() -> String {
+    let relay_urls = app_default_message_relays();
+    let key_package_relay_urls = app_default_key_package_relays();
     serde_json::json!({
-        "relay_urls": DEFAULT_RELAY_URLS,
-        "key_package_relay_urls": DEFAULT_KEY_PACKAGE_RELAY_URLS,
+        "relay_urls": relay_urls,
+        "key_package_relay_urls": key_package_relay_urls,
         "call_moq_url": DEFAULT_CALL_MOQ_URL,
         "call_broadcast_prefix": DEFAULT_CALL_BROADCAST_PREFIX,
     })
@@ -76,10 +61,13 @@ pub(super) fn relay_reset_config_json(existing_json: Option<&str>) -> String {
     }
 
     if let Some(obj) = value.as_object_mut() {
-        obj.insert("relay_urls".into(), serde_json::json!(DEFAULT_RELAY_URLS));
+        obj.insert(
+            "relay_urls".into(),
+            serde_json::json!(app_default_message_relays()),
+        );
         obj.insert(
             "key_package_relay_urls".into(),
-            serde_json::json!(DEFAULT_KEY_PACKAGE_RELAY_URLS),
+            serde_json::json!(app_default_key_package_relays()),
         );
     }
 
@@ -105,7 +93,7 @@ impl AppCore {
                 return parsed;
             }
         }
-        DEFAULT_RELAY_URLS
+        app_default_message_relays()
             .iter()
             .filter_map(|u| RelayUrl::parse(u).ok())
             .collect()
@@ -121,7 +109,7 @@ impl AppCore {
                 return parsed;
             }
         }
-        DEFAULT_KEY_PACKAGE_RELAY_URLS
+        app_default_key_package_relays()
             .iter()
             .filter_map(|u| RelayUrl::parse(u).ok())
             .collect()
@@ -144,7 +132,7 @@ impl AppCore {
             }
         }
 
-        DEFAULT_BLOSSOM_SERVERS
+        app_default_blossom_servers()
             .iter()
             .filter_map(|u| Url::parse(u).ok().map(|_| (*u).to_string()))
             .collect()

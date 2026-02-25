@@ -3,6 +3,8 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use pika_relay_profiles::{app_default_key_package_relays, app_default_message_relays};
+
 use crate::bindings;
 use crate::bindings::BuildProfile;
 use crate::cli::{human_log, json_print, CliError, JsonOk};
@@ -22,6 +24,14 @@ pub fn run(
         }
         crate::cli::RunPlatform::Iced => run_iced(root, json, verbose, args.release),
     }
+}
+
+fn default_app_relay_csv() -> String {
+    app_default_message_relays().join(",")
+}
+
+fn default_app_kp_relay_csv() -> String {
+    app_default_key_package_relays().join(",")
 }
 
 fn run_ios(
@@ -406,12 +416,12 @@ fn maybe_write_ios_relay_config(
         .ok()
         .or_else(|| std::env::var("PIKA_RELAY_URL").ok())
         .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "wss://relay.primal.net,wss://nos.lol,wss://relay.damus.io".into());
+        .unwrap_or_else(default_app_relay_csv);
     let kp_relays = std::env::var("PIKA_KEY_PACKAGE_RELAY_URLS")
         .ok()
         .or_else(|| std::env::var("PIKA_KP_RELAY_URLS").ok())
         .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "wss://nostr-pub.wellorder.net,wss://nostr-01.yakihonne.com,wss://nostr-02.yakihonne.com".into());
+        .unwrap_or_else(default_app_kp_relay_csv);
 
     let relay_items: Vec<String> = relays
         .split(',')
@@ -989,12 +999,12 @@ fn maybe_write_android_relay_config(
         .ok()
         .or_else(|| std::env::var("PIKA_RELAY_URL").ok())
         .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "wss://relay.primal.net,wss://nos.lol,wss://relay.damus.io".into());
+        .unwrap_or_else(default_app_relay_csv);
     let kp_relays = std::env::var("PIKA_KEY_PACKAGE_RELAY_URLS")
         .ok()
         .or_else(|| std::env::var("PIKA_KP_RELAY_URLS").ok())
         .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "wss://nostr-pub.wellorder.net,wss://nostr-01.yakihonne.com,wss://nostr-02.yakihonne.com".into());
+        .unwrap_or_else(default_app_kp_relay_csv);
 
     let relay_items: Vec<String> = relays
         .split(',')
