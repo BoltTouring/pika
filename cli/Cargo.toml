@@ -19,6 +19,7 @@ nostr-blossom = "0.44.0"
 nostr-sdk = { version = "0.44.1", features = ["nip59"] }
 pika-agent-protocol = { path = "../crates/pika-agent-protocol" }
 pika-agent-control-plane = { path = "../crates/pika-agent-control-plane" }
+pika-marmot-runtime = { path = "../crates/pika-marmot-runtime" }
 pikachat-sidecar = { path = "../crates/pikachat-sidecar" }
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls"] }

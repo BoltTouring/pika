@@ -5833,6 +5833,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "pika-marmot-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "mdk-core 0.6.0 (git+https://github.com/marmot-protocol/mdk?rev=d9f372743625de17f6fcd81eecd5084917a8ebb1)",
+ "mdk-sqlite-storage",
+ "nostr-sdk",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "pika-media"
 version = "0.1.0"
 dependencies = [
@@ -5963,6 +5975,7 @@ dependencies = [
  "nostr-sdk",
  "pika-agent-control-plane",
  "pika-agent-protocol",
+ "pika-marmot-runtime",
  "pikachat-sidecar",
  "rand 0.8.5",
  "reqwest",
@@ -5987,6 +6000,7 @@ dependencies = [
  "mdk-storage-traits 0.6.0 (git+https://github.com/marmot-protocol/mdk?rev=d9f372743625de17f6fcd81eecd5084917a8ebb1)",
  "nostr-blossom",
  "nostr-sdk",
+ "pika-marmot-runtime",
  "pika-media",
  "reqwest",
  "rustls 0.23.36",

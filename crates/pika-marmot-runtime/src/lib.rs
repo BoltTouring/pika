@@ -1,12 +1,16 @@
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use mdk_core::MDK;
 use mdk_sqlite_storage::MdkSqliteStorage;
-use nostr_sdk::prelude::Keys;
+use nostr_sdk::prelude::{EventId, Keys};
 use serde::{Deserialize, Serialize};
 
 pub type PikaMdk = MDK<MdkSqliteStorage>;
+
+pub const PROCESSED_MLS_EVENT_IDS_FILE: &str = "processed_mls_event_ids_v1.txt";
+pub const PROCESSED_MLS_EVENT_IDS_MAX: usize = 8192;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct IdentityFile {
@@ -23,7 +27,7 @@ pub fn load_or_create_keys(identity_path: &Path) -> Result<Keys> {
 
     let keys = Keys::generate();
     let secret = keys.secret_key().to_secret_hex();
-    let pubkey = keys.public_key().to_hex().to_lowercase();
+    let pubkey = keys.public_key().to_hex();
     let f = IdentityFile {
         secret_key_hex: secret,
         public_key_hex: pubkey,
@@ -48,7 +52,7 @@ pub fn open_mdk(state_dir: &Path) -> Result<PikaMdk> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("create dir {}", parent.display()))?;
     }
-    // Unencrypted for dev/test sidecar usage.
+    // Unencrypted for dev/test usage.
     let storage = MdkSqliteStorage::new_unencrypted(&db_path)
         .with_context(|| format!("open mdk sqlite: {}", db_path.display()))?;
     Ok(MDK::new(storage))
@@ -56,4 +60,36 @@ pub fn open_mdk(state_dir: &Path) -> Result<PikaMdk> {
 
 pub fn new_mdk(state_dir: &Path, _label: &str) -> Result<PikaMdk> {
     open_mdk(state_dir)
+}
+
+pub fn processed_mls_event_ids_path(state_dir: &Path) -> PathBuf {
+    state_dir.join(PROCESSED_MLS_EVENT_IDS_FILE)
+}
+
+pub fn load_processed_mls_event_ids(state_dir: &Path) -> HashSet<EventId> {
+    let path = processed_mls_event_ids_path(state_dir);
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return HashSet::new();
+    };
+    raw.lines()
+        .filter_map(|line| EventId::from_hex(line.trim()).ok())
+        .collect()
+}
+
+pub fn persist_processed_mls_event_ids(
+    state_dir: &Path,
+    event_ids: &HashSet<EventId>,
+) -> Result<()> {
+    let mut ids: Vec<String> = event_ids.iter().map(|id| id.to_hex()).collect();
+    ids.sort_unstable();
+    if ids.len() > PROCESSED_MLS_EVENT_IDS_MAX {
+        ids = ids.split_off(ids.len() - PROCESSED_MLS_EVENT_IDS_MAX);
+    }
+    let mut body = ids.join("\n");
+    if !body.is_empty() {
+        body.push('\n');
+    }
+    let path = processed_mls_event_ids_path(state_dir);
+    std::fs::write(&path, body)
+        .with_context(|| format!("persist processed MLS event ids to {}", path.display()))
 }

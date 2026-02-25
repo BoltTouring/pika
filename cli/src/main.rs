@@ -38,8 +38,6 @@ const DEFAULT_KP_RELAY_URLS: &[&str] = &[
     "wss://nostr-01.yakihonne.com",
     "wss://nostr-02.yakihonne.com",
 ];
-const PROCESSED_MLS_EVENT_IDS_FILE: &str = "processed_mls_event_ids_v1.txt";
-const PROCESSED_MLS_EVENT_IDS_MAX: usize = 8192;
 
 fn default_state_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("XDG_STATE_HOME") {
@@ -706,38 +704,6 @@ fn print(v: serde_json::Value) {
     println!("{}", serde_json::to_string_pretty(&v).expect("json encode"));
 }
 
-fn processed_mls_event_ids_path(state_dir: &Path) -> PathBuf {
-    state_dir.join(PROCESSED_MLS_EVENT_IDS_FILE)
-}
-
-fn load_processed_mls_event_ids(state_dir: &Path) -> HashSet<EventId> {
-    let path = processed_mls_event_ids_path(state_dir);
-    let Ok(raw) = std::fs::read_to_string(path) else {
-        return HashSet::new();
-    };
-    raw.lines()
-        .filter_map(|line| EventId::from_hex(line.trim()).ok())
-        .collect()
-}
-
-fn persist_processed_mls_event_ids(
-    state_dir: &Path,
-    event_ids: &HashSet<EventId>,
-) -> anyhow::Result<()> {
-    let mut ids: Vec<String> = event_ids.iter().map(|id| id.to_hex()).collect();
-    ids.sort_unstable();
-    if ids.len() > PROCESSED_MLS_EVENT_IDS_MAX {
-        ids = ids.split_off(ids.len() - PROCESSED_MLS_EVENT_IDS_MAX);
-    }
-    let mut body = ids.join("\n");
-    if !body.is_empty() {
-        body.push('\n');
-    }
-    let path = processed_mls_event_ids_path(state_dir);
-    std::fs::write(&path, body)
-        .with_context(|| format!("persist processed MLS event ids to {}", path.display()))
-}
-
 /// Fetch recent group messages from the relay and feed them through
 /// `mdk.process_message` so the local MLS epoch is up-to-date before we
 /// attempt to create a new message.
@@ -1235,7 +1201,7 @@ async fn cmd_send(
     }
 
     let (keys, mdk) = open(cli)?;
-    let mut seen_mls_event_ids = load_processed_mls_event_ids(&cli.state_dir);
+    let mut seen_mls_event_ids = mdk_util::load_processed_mls_event_ids(&cli.state_dir);
 
     // ── Resolve target group ────────────────────────────────────────────
     struct ResolvedTarget {
@@ -1362,7 +1328,7 @@ async fn cmd_send(
         .context("create message")?;
     relay_util::publish_and_confirm(&client, &relays, &msg_event, "send_message").await?;
     client.shutdown().await;
-    persist_processed_mls_event_ids(&cli.state_dir, &seen_mls_event_ids)?;
+    mdk_util::persist_processed_mls_event_ids(&cli.state_dir, &seen_mls_event_ids)?;
 
     let mut out = json!({
         "event_id": msg_event.id.to_hex(),
