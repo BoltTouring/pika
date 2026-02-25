@@ -5806,6 +5806,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "pika-agent-microvm"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "nostr-sdk",
+ "pika-agent-control-plane",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "pika-agent-protocol"
 version = "0.1.0"
 dependencies = [
@@ -5902,6 +5915,7 @@ dependencies = [
  "nostr",
  "nostr-sdk",
  "pika-agent-control-plane",
+ "pika-agent-microvm",
  "rand 0.8.5",
  "reqwest",
  "serde",
@@ -5976,6 +5990,7 @@ dependencies = [
  "nostr-blossom",
  "nostr-sdk",
  "pika-agent-control-plane",
+ "pika-agent-microvm",
  "pika-agent-protocol",
  "pika-marmot-runtime",
  "pikachat-sidecar",

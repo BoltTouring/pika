@@ -6,6 +6,7 @@ members = [
   "cli",
   "crates/pika-agent-protocol",
   "crates/pika-agent-control-plane",
+  "crates/pika-agent-microvm",
   "crates/pika-marmot-runtime",
   "crates/pikachat-sidecar",
   "crates/pika-desktop",

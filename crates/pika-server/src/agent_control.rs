@@ -8,10 +8,12 @@ use nostr_sdk::prelude::*;
 use pika_agent_control_plane::{
     AgentControlCmdEnvelope, AgentControlCommand, AgentControlErrorEnvelope,
     AgentControlResultEnvelope, AgentControlStatusEnvelope, GetRuntimeCommand, ListRuntimesCommand,
-    MicrovmProvisionParams, ProcessWelcomeCommand, ProtocolKind, ProviderKind, ProvisionCommand,
-    RuntimeDescriptor, RuntimeLifecyclePhase, TeardownCommand, CMD_SCHEMA_V1, CONTROL_CMD_KIND,
-    CONTROL_ERROR_KIND, CONTROL_RESULT_KIND, CONTROL_STATUS_KIND, ERROR_SCHEMA_V1,
-    RESULT_SCHEMA_V1, STATUS_SCHEMA_V1,
+    ProcessWelcomeCommand, ProtocolKind, ProviderKind, ProvisionCommand, RuntimeDescriptor,
+    RuntimeLifecyclePhase, TeardownCommand, CMD_SCHEMA_V1, CONTROL_CMD_KIND, CONTROL_ERROR_KIND,
+    CONTROL_RESULT_KIND, CONTROL_STATUS_KIND, ERROR_SCHEMA_V1, RESULT_SCHEMA_V1, STATUS_SCHEMA_V1,
+};
+use pika_agent_microvm::{
+    build_create_vm_request, resolve_params, spawner_create_error, MicrovmSpawnerClient,
 };
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -20,17 +22,8 @@ use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
 use crate::agent_clients::fly_machines::FlyClient;
-use crate::agent_clients::microvm_spawner::{
-    CreateVmRequest, GuestAutostartRequest, MicrovmSpawnerClient,
-};
 use crate::agent_clients::workers_agents::{CreateAgentRequest, WorkersClient};
 
-const DEFAULT_MICROVM_SPAWNER_URL: &str = "http://127.0.0.1:8080";
-const DEFAULT_MICROVM_FLAKE_REF: &str = "github:sledtools/pika";
-const DEFAULT_MICROVM_DEV_SHELL: &str = "default";
-const DEFAULT_MICROVM_CPU: u32 = 1;
-const DEFAULT_MICROVM_MEMORY_MB: u32 = 1024;
-const DEFAULT_MICROVM_TTL_SECONDS: u64 = 7200;
 const DEFAULT_CONTROL_STATE_PATH: &str = ".pika-agent-control-state.json";
 const DEFAULT_CONTROL_LOOKBACK_SECS: u64 = 600;
 const DEFAULT_IDEMPOTENCY_MAX_ENTRIES: usize = 8192;
@@ -1829,7 +1822,7 @@ impl ProviderAdapter for MicrovmAdapter {
     ) -> anyhow::Result<ProvisionedRuntime> {
         let profile = runtime_profile(ProviderKind::Microvm);
         let params = provision.microvm.clone().unwrap_or_default();
-        let resolved = resolve_microvm_params(&params, provision.keep);
+        let resolved = resolve_params(&params, provision.keep);
         let relay_urls = if provision.relay_urls.is_empty() {
             default_relay_urls()
         } else {
@@ -1845,42 +1838,17 @@ impl ProviderAdapter for MicrovmAdapter {
         let bot_secret_hex = bot_keys.secret_key().to_secret_hex();
 
         let spawner = MicrovmSpawnerClient::new(resolved.spawner_url.clone());
-        let create_vm = CreateVmRequest {
-            flake_ref: Some(resolved.flake_ref.clone()),
-            dev_shell: Some(resolved.dev_shell.clone()),
-            cpu: Some(resolved.cpu),
-            memory_mb: Some(resolved.memory_mb),
-            ttl_seconds: Some(resolved.ttl_seconds),
-            spawn_variant: Some(resolved.spawn_variant.clone()),
-            guest_autostart: Some(GuestAutostartRequest {
-                command: "bash /workspace/pika-agent/start-agent.sh".to_string(),
-                env: std::collections::BTreeMap::from([
-                    ("PIKA_OWNER_PUBKEY".to_string(), owner_pubkey.to_hex()),
-                    ("PIKA_RELAY_URLS".to_string(), relay_urls.join(",")),
-                    ("PIKA_BOT_PUBKEY".to_string(), bot_pubkey.clone()),
-                ]),
-                files: std::collections::BTreeMap::from([
-                    (
-                        "workspace/pika-agent/start-agent.sh".to_string(),
-                        microvm_autostart_script().to_string(),
-                    ),
-                    (
-                        "workspace/pika-agent/microvm-bridge.py".to_string(),
-                        microvm_bridge_script().to_string(),
-                    ),
-                    (
-                        "workspace/pika-agent/state/identity.json".to_string(),
-                        bot_identity_file(&bot_secret_hex, &bot_pubkey),
-                    ),
-                ]),
-            }),
-        };
-        let vm = spawner.create_vm(&create_vm).await.with_context(|| {
-            format!(
-                "failed to create microvm via vm-spawner at {} (health: {}/healthz)",
-                resolved.spawner_url, resolved.spawner_url
-            )
-        })?;
+        let create_vm = build_create_vm_request(
+            &resolved,
+            &owner_pubkey,
+            &relay_urls,
+            &bot_secret_hex,
+            &bot_pubkey,
+        );
+        let vm = spawner
+            .create_vm(&create_vm)
+            .await
+            .map_err(|err| spawner_create_error(&resolved.spawner_url, err))?;
 
         Ok(ProvisionedRuntime {
             provider_handle: ProviderHandle::Microvm {
@@ -1942,55 +1910,6 @@ impl ProviderAdapter for MicrovmAdapter {
     }
 }
 
-#[derive(Clone, Debug)]
-struct ResolvedMicrovmParams {
-    spawner_url: String,
-    spawn_variant: String,
-    flake_ref: String,
-    dev_shell: String,
-    cpu: u32,
-    memory_mb: u32,
-    ttl_seconds: u64,
-    keep: bool,
-}
-
-fn resolve_microvm_params(params: &MicrovmProvisionParams, keep: bool) -> ResolvedMicrovmParams {
-    ResolvedMicrovmParams {
-        spawner_url: params
-            .spawner_url
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or(DEFAULT_MICROVM_SPAWNER_URL)
-            .to_string(),
-        spawn_variant: params
-            .spawn_variant
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or("prebuilt-cow")
-            .to_string(),
-        flake_ref: params
-            .flake_ref
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or(DEFAULT_MICROVM_FLAKE_REF)
-            .to_string(),
-        dev_shell: params
-            .dev_shell
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or(DEFAULT_MICROVM_DEV_SHELL)
-            .to_string(),
-        cpu: params.cpu.unwrap_or(DEFAULT_MICROVM_CPU),
-        memory_mb: params.memory_mb.unwrap_or(DEFAULT_MICROVM_MEMORY_MB),
-        ttl_seconds: params.ttl_seconds.unwrap_or(DEFAULT_MICROVM_TTL_SECONDS),
-        keep,
-    }
-}
-
 fn default_relay_urls() -> Vec<String> {
     vec![
         "wss://us-east.nostr.pikachat.org".to_string(),
@@ -2042,167 +1961,6 @@ fn new_runtime_id(provider: ProviderKind) -> String {
         rng.r#gen::<u32>(),
         rng.r#gen::<u32>()
     )
-}
-
-fn bot_identity_file(secret_hex: &str, pubkey_hex: &str) -> String {
-    let body = serde_json::to_string_pretty(&json!({
-        "secret_key_hex": secret_hex,
-        "public_key_hex": pubkey_hex,
-    }))
-    .expect("identity json");
-    format!("{body}\n")
-}
-
-fn microvm_autostart_script() -> &'static str {
-    r#"#!/usr/bin/env bash
-set -euo pipefail
-
-STATE_DIR="/workspace/pika-agent/state"
-mkdir -p "$STATE_DIR"
-
-if [[ -z "${PIKA_OWNER_PUBKEY:-}" ]]; then
-  echo "[microvm-agent] missing PIKA_OWNER_PUBKEY" >&2
-  exit 1
-fi
-if [[ -z "${PIKA_RELAY_URLS:-}" ]]; then
-  echo "[microvm-agent] missing PIKA_RELAY_URLS" >&2
-  exit 1
-fi
-
-relay_args=()
-IFS=',' read -r -a relay_values <<< "${PIKA_RELAY_URLS}"
-for relay in "${relay_values[@]}"; do
-  relay="${relay#"${relay%%[![:space:]]*}"}"
-  relay="${relay%"${relay##*[![:space:]]}"}"
-  if [[ -n "$relay" ]]; then
-    relay_args+=(--relay "$relay")
-  fi
-done
-if [[ ${#relay_args[@]} -eq 0 ]]; then
-  echo "[microvm-agent] no valid relays in PIKA_RELAY_URLS" >&2
-  exit 1
-fi
-
-if ! command -v pikachat >/dev/null 2>&1; then
-  echo "[microvm-agent] could not find pikachat binary" >&2
-  exit 1
-fi
-
-exec pikachat daemon \
-  --state-dir "$STATE_DIR" \
-  --auto-accept-welcomes \
-  --allow-pubkey "${PIKA_OWNER_PUBKEY}" \
-  "${relay_args[@]}" \
-  --exec "python3 /workspace/pika-agent/microvm-bridge.py"
-"#
-}
-
-fn microvm_bridge_script() -> &'static str {
-    r#"#!/usr/bin/env python3
-import json
-import os
-import re
-import shlex
-import subprocess
-import sys
-from collections import deque
-
-owner = os.environ.get("PIKA_OWNER_PUBKEY", "").strip().lower()
-pi_cmd = os.environ.get("PIKA_PI_CMD", "pi -p").strip()
-pi_timeout_ms = int(os.environ.get("PIKA_PI_TIMEOUT_MS", "120000"))
-if pi_timeout_ms < 1000:
-    pi_timeout_ms = 1000
-
-ANSI_RE = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
-seen_message_ids = deque(maxlen=256)
-
-def strip_ansi(text):
-    return ANSI_RE.sub("", text)
-
-def send(cmd):
-    sys.stdout.write(json.dumps(cmd) + "\n")
-    sys.stdout.flush()
-
-def is_duplicate(message_id):
-    if not message_id:
-        return False
-    if message_id in seen_message_ids:
-        return True
-    seen_message_ids.append(message_id)
-    return False
-
-def run_local_pi(prompt):
-    if not pi_cmd:
-        return None, "PIKA_PI_CMD is empty"
-    try:
-        proc = subprocess.run(
-            shlex.split(pi_cmd),
-            input=prompt + "\n",
-            text=True,
-            capture_output=True,
-            timeout=pi_timeout_ms / 1000.0,
-            check=False,
-        )
-    except FileNotFoundError:
-        return None, f"pi command not found: {pi_cmd}"
-    except subprocess.TimeoutExpired:
-        return None, f"pi command timed out after {pi_timeout_ms}ms"
-    except Exception as exc:
-        return None, f"pi command failed: {exc}"
-
-    stdout = strip_ansi(proc.stdout or "").strip()
-    stderr = strip_ansi(proc.stderr or "").strip()
-    if proc.returncode != 0:
-        detail = stderr or stdout or f"exit code {proc.returncode}"
-        return None, f"pi command failed ({detail})"
-
-    lines = [line.strip() for line in stdout.splitlines() if line.strip()]
-    if not lines:
-        return None, "pi command returned empty output"
-    return lines[-1], None
-
-send({"type": "ready"})
-
-for raw_line in sys.stdin:
-    raw_line = raw_line.strip()
-    if not raw_line:
-        continue
-    try:
-        msg = json.loads(raw_line)
-    except Exception:
-        continue
-
-    if msg.get("type") != "event":
-        continue
-    payload = msg.get("payload") or {}
-    if payload.get("type") != "message":
-        continue
-
-    from_pub = str(payload.get("from_pubkey") or "").strip().lower()
-    if owner and from_pub != owner:
-        continue
-
-    message_id = str(payload.get("message_id") or "").strip()
-    if is_duplicate(message_id):
-        continue
-
-    prompt = str(payload.get("content") or "").strip()
-    if not prompt:
-        continue
-
-    reply, err = run_local_pi(prompt)
-    if err:
-        reply = f"error: {err}"
-    if not reply:
-        continue
-
-    send({
-        "type": "send_message",
-        "to_group_id": payload.get("nostr_group_id"),
-        "content": reply,
-        "client_request_id": message_id or None
-    })
-"#
 }
 
 #[cfg(test)]

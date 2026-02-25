@@ -20,6 +20,7 @@ use pika_agent_control_plane::{
     ListRuntimesCommand, MicrovmProvisionParams, ProtocolKind, ProviderKind, ProvisionCommand,
     RuntimeLifecyclePhase,
 };
+use pika_agent_microvm::microvm_params_provided;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
@@ -1735,14 +1736,7 @@ fn map_microvm_control_params(microvm: &AgentNewMicrovmArgs) -> Option<MicrovmPr
         memory_mb: microvm.memory_mb,
         ttl_seconds: microvm.ttl_seconds,
     };
-    if params.spawner_url.is_some()
-        || params.spawn_variant.is_some()
-        || params.flake_ref.is_some()
-        || params.dev_shell.is_some()
-        || params.cpu.is_some()
-        || params.memory_mb.is_some()
-        || params.ttl_seconds.is_some()
-    {
+    if microvm_params_provided(&params) {
         Some(params)
     } else {
         None
