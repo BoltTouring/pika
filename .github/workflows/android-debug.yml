@@ -18,8 +18,8 @@ jobs:
       - name: Cache /nix
         uses: actions/cache@v4
         with:
-          key: nix-v1-${{ runner.os }}-${{ hashFiles('flake.lock') }}
-          restore-keys: nix-v1-${{ runner.os }}-
+          key: nix-v2-${{ runner.os }}-${{ hashFiles('flake.lock') }}
+          restore-keys: nix-v2-${{ runner.os }}-
           path: /nix
 
       - name: Fix /nix ownership
@@ -33,15 +33,15 @@ jobs:
       - name: Cache Cargo home
         uses: actions/cache@v4
         with:
-          key: cargo-home-v1-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: cargo-home-v1-${{ runner.os }}-
+          key: cargo-home-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-home-v2-${{ runner.os }}-
           path: ~/.cargo
 
       - name: Cache Cargo target
         uses: actions/cache@v4
         with:
-          key: cargo-target-v1-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: cargo-target-v1-${{ runner.os }}-
+          key: cargo-target-v2-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-target-v2-${{ runner.os }}-
           path: target
 
       - name: Build debug APK
