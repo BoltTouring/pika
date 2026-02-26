@@ -1,8 +1,13 @@
 import SwiftUI
 import MarkdownUI
-import PhotosUI
-import AVFAudio
-import UniformTypeIdentifiers
+import WebKit
+
+// WKWebView requires a resolvable HTTPS baseURL for loadHTMLString to allow
+// fetching external subresources (images, scripts, etc.). The domain must
+// actually resolve — non-routable origins like localhost or .invalid break
+// asset loading. We use a domain we control that won't serve unexpected content.
+// TODO: Change to a pika related domain
+private let webViewBaseURL = URL(string: "https://webview.benthecarman.com")!
 
 struct ChatView: View {
     let chatId: String
@@ -17,27 +22,23 @@ struct ChatView: View {
     let onTapSender: (@MainActor (String) -> Void)?
     let onReact: (@MainActor (String, String) -> Void)?
     let onTypingStarted: (@MainActor () -> Void)?
-    let onDownloadMedia: (@MainActor (String, String, String) -> Void)?
-    let onSendMedia: (@MainActor (String, Data, String, String, String) -> Void)?
-    @State private var selectedPhotoItem: PhotosPickerItem?
-    @State private var showFileImporter = false
     @State private var messageText = ""
     @State private var isAtBottom = true
     @State private var shouldStickToBottom = true
     @State private var isUserScrolling = false
     @State private var activeReactionMessageId: String?
     @State private var contextMenuMessage: ChatMessage?
-    @State private var contextMenuAnchorFrame: CGRect = .zero
     @State private var showContextActionCard = false
     @State private var showContextEmojiPicker = false
     @State private var showMentionPicker = false
     @State private var mentionQuery = ""
     @State private var insertedMentions: [(display: String, npub: String)] = []
     @State private var replyDraftMessage: ChatMessage?
-    @State private var fullscreenImageAttachment: ChatMediaAttachment?
-    @State private var voiceRecorder = VoiceRecorder()
-    @State private var showMicPermissionDenied = false
     @FocusState private var isInputFocused: Bool
+    @State private var newMessageCount = 0
+    @State private var firstUnreadMessageId: String?
+    @State private var didSetInitialUnread = false
+    let initialUnreadCount: Int
 
     private let scrollButtonBottomPadding: CGFloat = 12
     private let bottomVisibilityTolerance: CGFloat = 100
@@ -48,6 +49,7 @@ struct ChatView: View {
         state: ChatScreenState,
         activeCall: CallState?,
         callEvents: [CallTimelineEvent],
+        initialUnreadCount: Int = 0,
         onSendMessage: @escaping @MainActor (String, String?) -> Void,
         onStartCall: @escaping @MainActor () -> Void,
         onStartVideoCall: @escaping @MainActor () -> Void,
@@ -55,14 +57,13 @@ struct ChatView: View {
         onGroupInfo: (@MainActor () -> Void)? = nil,
         onTapSender: (@MainActor (String) -> Void)? = nil,
         onReact: (@MainActor (String, String) -> Void)? = nil,
-        onTypingStarted: (@MainActor () -> Void)? = nil,
-        onDownloadMedia: (@MainActor (String, String, String) -> Void)? = nil,
-        onSendMedia: (@MainActor (String, Data, String, String, String) -> Void)? = nil
+        onTypingStarted: (@MainActor () -> Void)? = nil
     ) {
         self.chatId = chatId
         self.state = state
         self.activeCall = activeCall
         self.callEvents = callEvents
+        self.initialUnreadCount = initialUnreadCount
         self.onSendMessage = onSendMessage
         self.onStartCall = onStartCall
         self.onStartVideoCall = onStartVideoCall
@@ -71,8 +72,6 @@ struct ChatView: View {
         self.onTapSender = onTapSender
         self.onReact = onReact
         self.onTypingStarted = onTypingStarted
-        self.onDownloadMedia = onDownloadMedia
-        self.onSendMedia = onSendMedia
     }
 
     var body: some View {
@@ -135,6 +134,15 @@ struct ChatView: View {
                 }
 
                 ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        onTapSender?(peer.pubkey)
+                    } label: {
+                        Image(systemName: "info.circle")
+                    }
+                    .accessibilityLabel("Contact info")
+                }
+
+                ToolbarItem(placement: .topBarTrailing) {
                     ChatCallToolbarButton(
                         callForChat: callFor(chat),
                         hasLiveCallElsewhere: hasLiveCallElsewhere(chat: chat),
@@ -152,8 +160,8 @@ struct ChatView: View {
             }
         }
         .overlay {
-            GeometryReader { geo in
-                if let message = contextMenuMessage {
+            if let message = contextMenuMessage {
+                GeometryReader { geo in
                     ZStack {
                         Color.clear
                             .contentShape(Rectangle())
@@ -169,7 +177,6 @@ struct ChatView: View {
                         VStack(alignment: message.isMine ? .trailing : .leading, spacing: 12) {
                             QuickReactionBar(
                                 onSelect: { emoji in
-                                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
                                     onReact?(message.id, emoji)
                                     withAnimation(.easeOut(duration: 0.18)) {
                                         contextMenuMessage = nil
@@ -214,42 +221,23 @@ struct ChatView: View {
                                             activeReactionMessageId = nil
                                             showContextActionCard = false
                                         }
-                                    },
-                                    onSaveMedia: message.media.first(where: {
-                                        $0.mimeType.hasPrefix("image/") && $0.localPath != nil
-                                    }) != nil ? {
-                                        for attachment in message.media {
-                                            guard attachment.mimeType.hasPrefix("image/"),
-                                                  let path = attachment.localPath,
-                                                  let image = UIImage(contentsOfFile: path)
-                                            else { continue }
-                                            UIImageWriteToSavedPhotosAlbum(image, nil, nil, nil)
-                                        }
-                                        withAnimation(.easeOut(duration: 0.15)) {
-                                            contextMenuMessage = nil
-                                            activeReactionMessageId = nil
-                                            showContextActionCard = false
-                                        }
-                                    } : nil
+                                    }
                                 )
                             }
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: message.isMine ? .topTrailing : .topLeading)
-                        .padding(.top, contextMenuOffset(geo: geo))
+                        .padding(.top, max(geo.safeAreaInsets.top + 14, 34))
                         .padding(.horizontal, 20)
-                        .animation(nil, value: contextMenuAnchorFrame)
+                        .padding(.bottom, 24)
                     }
-                    .transition(.opacity.combined(with: .scale(scale: 0.95, anchor: .center)))
                 }
+                .transition(.opacity)
             }
-            .allowsHitTesting(contextMenuMessage != nil)
         }
         .sheet(isPresented: $showContextEmojiPicker) {
             if let message = contextMenuMessage {
                 EmojiPickerSheet { emoji in
-                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
                     onReact?(message.id, emoji)
-                    showContextEmojiPicker = false
                     withAnimation(.easeOut(duration: 0.18)) {
                         contextMenuMessage = nil
                         activeReactionMessageId = nil
@@ -258,9 +246,6 @@ struct ChatView: View {
                 }
                 .presentationDetents([.medium, .large])
             }
-        }
-        .fullScreenCover(item: $fullscreenImageAttachment, onDismiss: nil) { attachment in
-            FullscreenImageViewer(attachment: attachment)
         }
     }
 
@@ -288,24 +273,18 @@ struct ChatView: View {
                                         },
                                         onReact: onReact,
                                         activeReactionMessageId: $activeReactionMessageId,
-                                        onLongPressMessage: { message, frame in
-                                            isInputFocused = false
-                                            contextMenuAnchorFrame = frame
+                                        onLongPressMessage: { message in
                                             withAnimation(.spring(response: 0.3, dampingFraction: 0.78)) {
                                                 activeReactionMessageId = message.id
                                                 contextMenuMessage = message
                                                 showContextActionCard = true
                                             }
-                                        },
-                                        onDownloadMedia: onDownloadMedia.map { callback in
-                                            { messageId, hash in callback(chatId, messageId, hash) }
-                                        },
-                                        onTapImage: { attachment in
-                                            fullscreenImageAttachment = attachment
                                         }
                                     )
                                 case .callEvent(let event):
                                     CallTimelineEventRow(event: event)
+                                case .newMessagesDivider:
+                                    NewMessagesDividerRow()
                                 }
                             }
 
@@ -368,8 +347,33 @@ struct ChatView: View {
                     guard shouldStickToBottom else { return }
                     scrollToBottom(using: proxy, animated: true)
                 }
+                .onChange(of: chat.messages.count) { oldCount, newCount in
+                    guard newCount > oldCount else { return }
+                    // Set the initial unread divider once when messages first load
+                    if !didSetInitialUnread && initialUnreadCount > 0 {
+                        let idx = max(0, newCount - initialUnreadCount)
+                        if idx < newCount {
+                            firstUnreadMessageId = chat.messages[idx].id
+                        }
+                        didSetInitialUnread = true
+                        shouldStickToBottom = false
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                            withAnimation(.easeOut(duration: 0.3)) {
+                                proxy.scrollTo("unread-divider", anchor: .top)
+                            }
+                        }
+                        return
+                    }
+                    // While scrolled up, count new incoming messages
+                    if !shouldStickToBottom {
+                        newMessageCount += newCount - oldCount
+                    }
+                }
                 .onChange(of: chat.chatId) { _, _ in
                     shouldStickToBottom = true
+                    firstUnreadMessageId = nil
+                    didSetInitialUnread = false
+                    newMessageCount = 0
                     scrollToBottom(using: proxy, animated: false)
                 }
                 .onAppear {
@@ -377,22 +381,43 @@ struct ChatView: View {
                         scrollToBottom(using: proxy, animated: false)
                     }
                 }
+                // Scroll to bottom when keyboard appears so the input and latest message are visible
+                .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
+                    guard shouldStickToBottom else { return }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                        scrollToBottom(using: proxy, animated: true)
+                    }
+                }
                 .overlay(alignment: .bottomTrailing) {
                     if !isAtBottom {
-                        Button {
-                            shouldStickToBottom = true
-                            scrollToBottom(using: proxy, animated: true)
-                        } label: {
-                            Image(systemName: "arrow.down")
-                                .font(.footnote.weight(.semibold))
-                                .padding(10)
+                        VStack(spacing: 6) {
+                            if newMessageCount > 0 {
+                                Text("\(newMessageCount) new")
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(.white)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 4)
+                                    .background(Color.blue, in: Capsule())
+                                    .transition(.scale.combined(with: .opacity))
+                            }
+                            Button {
+                                shouldStickToBottom = true
+                                newMessageCount = 0
+                                firstUnreadMessageId = nil
+                                scrollToBottom(using: proxy, animated: true)
+                            } label: {
+                                Image(systemName: "arrow.down")
+                                    .font(.footnote.weight(.semibold))
+                                    .padding(10)
+                            }
+                            .foregroundStyle(.primary)
+                            .background(.ultraThinMaterial, in: Circle())
+                            .overlay(Circle().strokeBorder(.quaternary, lineWidth: 0.5))
+                            .accessibilityLabel("Scroll to bottom")
                         }
-                        .foregroundStyle(.primary)
-                        .background(.ultraThinMaterial, in: Circle())
-                        .overlay(Circle().strokeBorder(.quaternary, lineWidth: 0.5))
+                        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: newMessageCount)
                         .padding(.trailing, 16)
                         .padding(.bottom, scrollButtonBottomPadding)
-                        .accessibilityLabel("Scroll to bottom")
                     }
                 }
             }
@@ -481,6 +506,21 @@ struct ChatView: View {
             }
         }
 
+        // Insert the "New Messages" divider before the first unread message group
+        if let firstUnreadId = firstUnreadMessageId {
+            var insertIdx: Int? = nil
+            for (i, row) in rows.enumerated() {
+                if case .messageGroup(let group) = row,
+                   group.messages.contains(where: { $0.id == firstUnreadId }) {
+                    insertIdx = i
+                    break
+                }
+            }
+            if let idx = insertIdx {
+                rows.insert(.newMessagesDivider, at: idx)
+            }
+        }
+
         return rows
     }
 
@@ -519,6 +559,7 @@ struct ChatView: View {
     private enum ChatTimelineRow: Identifiable {
         case messageGroup(GroupedChatMessage)
         case callEvent(CallTimelineEvent)
+        case newMessagesDivider
 
         var id: String {
             switch self {
@@ -526,6 +567,8 @@ struct ChatView: View {
                 return "msg:\(group.id)"
             case .callEvent(let event):
                 return "call:\(event.id)"
+            case .newMessagesDivider:
+                return "unread-divider"
             }
         }
     }
@@ -541,19 +584,6 @@ struct ChatView: View {
         messageText = ""
         insertedMentions = []
         replyDraftMessage = nil
-    }
-
-    private func contextMenuOffset(geo: GeometryProxy) -> CGFloat {
-        let overlayOriginY = geo.frame(in: .global).minY
-        // Where the message bubble is relative to the overlay
-        let anchorLocalY = contextMenuAnchorFrame.minY - overlayOriginY
-        // Leave room above for the reaction bar (~48 height + 12 spacing)
-        let reactionBarSpace: CGFloat = 60
-        let idealTop = anchorLocalY - reactionBarSpace
-        // Allow content near the top edge — the overlay draws over the nav bar anyway
-        let minTop: CGFloat = 10
-        let maxTop = geo.size.height * 0.5
-        return min(max(idealTop, minTop), maxTop)
     }
 
     private func callFor(_ chat: ChatViewState) -> CallState? {
@@ -595,99 +625,94 @@ struct ChatView: View {
     @ViewBuilder
     private func messageInputBar(chat: ChatViewState) -> some View {
         VStack(spacing: 0) {
-            if voiceRecorder.isRecording {
-                VoiceRecordingView(
-                    recorder: voiceRecorder,
-                    onSend: {
-                        Task {
-                            // Capture transcript before stopRecording resets state
-                            let transcriptText = voiceRecorder.transcript
-                            guard let url = await voiceRecorder.stopRecording() else { return }
-                            guard let data = try? Data(contentsOf: url) else { return }
-                            let timestamp = Int(Date().timeIntervalSince1970)
-                            // Send transcript as italic markdown caption
-                            let caption = transcriptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                                ? ""
-                                : "*\(transcriptText.trimmingCharacters(in: .whitespacesAndNewlines))*"
-                            onSendMedia?(chatId, data, "audio/mp4", "voice_\(timestamp).m4a", caption)
-                            try? FileManager.default.removeItem(at: url)
-                        }
-                    },
-                    onCancel: {
-                        voiceRecorder.cancelRecording()
+            if showMentionPicker, chat.isGroup {
+                MentionPickerPopup(members: chat.members, query: mentionQuery) { member in
+                    let displayTag = "@\(member.name ?? String(member.npub.prefix(8)))"
+                    // Remove the "@" + any partial query that triggered the picker.
+                    if let atIdx = messageText.lastIndex(of: "@") {
+                        messageText = String(messageText[..<atIdx])
                     }
-                )
-                .modifier(GlassInputModifier())
+                    messageText += "\(displayTag) "
+                    insertedMentions.append((display: displayTag, npub: member.npub))
+                    mentionQuery = ""
+                    showMentionPicker = false
+                }
+            }
+
+            if let replying = replyDraftMessage {
+                HStack(spacing: 10) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Replying to \(replySenderLabel(replying))")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        Text(replySnippet(replying))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    Spacer()
+                    Button {
+                        replyDraftMessage = nil
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.body)
+                            .foregroundStyle(.tertiary)
+                    }
+                    .buttonStyle(.plain)
+                }
                 .padding(.horizontal, 12)
-                .transition(.move(edge: .bottom).combined(with: .opacity))
-            } else {
-                if showMentionPicker, chat.isGroup {
-                    MentionPickerPopup(members: chat.members, query: mentionQuery) { member in
-                        let displayTag = "@\(member.name ?? String(member.npub.prefix(8)))"
-                        // Remove the "@" + any partial query that triggered the picker.
-                        if let atIdx = messageText.lastIndex(of: "@") {
-                            messageText = String(messageText[..<atIdx])
-                        }
-                        messageText += "\(displayTag) "
-                        insertedMentions.append((display: displayTag, npub: member.npub))
-                        mentionQuery = ""
-                        showMentionPicker = false
-                    }
+                .padding(.vertical, 8)
+                .background(.ultraThinMaterial)
+                .overlay(alignment: .leading) {
+                    Rectangle()
+                        .fill(Color.blue)
+                        .frame(width: 3)
                 }
+                .padding(.horizontal, 12)
+            }
 
-                if let replying = replyDraftMessage {
-                    HStack(spacing: 10) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Replying to \(replySenderLabel(replying))")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.secondary)
-                            Text(replySnippet(replying))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
+            HStack(spacing: 10) {
+                TextEditor(text: $messageText)
+                    .focused($isInputFocused)
+                    .frame(minHeight: 36, maxHeight: 150)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .scrollContentBackground(.hidden)
+                    .onAppear {
+                        if ProcessInfo.processInfo.isiOSAppOnMac {
+                            isInputFocused = true
                         }
-                        Spacer()
-                        Button {
-                            replyDraftMessage = nil
-                        } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .font(.body)
+                    }
+                    .onKeyPress(.return, phases: .down) { keyPress in
+                        if keyPress.modifiers.contains(.shift) {
+                            return .ignored
+                        }
+                        sendMessage()
+                        return .handled
+                    }
+                    .overlay(alignment: .topLeading) {
+                        if messageText.isEmpty {
+                            Text("Message")
                                 .foregroundStyle(.tertiary)
+                                .padding(.leading, 5)
+                                .padding(.top, 8)
+                                .allowsHitTesting(false)
                         }
-                        .buttonStyle(.plain)
                     }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(.ultraThinMaterial)
-                    .overlay(alignment: .leading) {
-                        Rectangle()
-                            .fill(Color.blue)
-                            .frame(width: 3)
-                    }
-                    .padding(.horizontal, 12)
-                }
-
-                ChatInputBar(
-                    messageText: $messageText,
-                    selectedPhotoItem: $selectedPhotoItem,
-                    showFileImporter: $showFileImporter,
-                    showAttachButton: onSendMedia != nil,
-                    showMicButton: onSendMedia != nil,
-                    isInputFocused: $isInputFocused,
-                    onSend: { sendMessage() },
-                    onStartVoiceRecording: { startVoiceRecording() }
-                )
-                .onChange(of: messageText) { _, newValue in
-                    if chat.isGroup {
-                        if let atIdx = newValue.lastIndex(of: "@") {
-                            let prefix = newValue[..<atIdx]
-                            let isWordStart = prefix.isEmpty || prefix.last == " " || prefix.last == "\n"
-                            if isWordStart {
-                                let query = String(newValue[newValue.index(after: atIdx)...])
-                                if !query.contains(" ") {
-                                    showMentionPicker = true
-                                    mentionQuery = query
-                                } else {
+                    .onChange(of: messageText) { _, newValue in
+                        if chat.isGroup {
+                            if let atIdx = newValue.lastIndex(of: "@") {
+                                let prefix = newValue[..<atIdx]
+                                let isWordStart = prefix.isEmpty || prefix.last == " " || prefix.last == "\n"
+                                if isWordStart {
+                                    let query = String(newValue[newValue.index(after: atIdx)...])
+                                    if !query.contains(" ") {
+                                        showMentionPicker = true
+                                        mentionQuery = query
+                                    } else {
+                                        showMentionPicker = false
+                                        mentionQuery = ""
+                                    }
+                                } else if showMentionPicker {
                                     showMentionPicker = false
                                     mentionQuery = ""
                                 }
@@ -695,85 +720,21 @@ struct ChatView: View {
                                 showMentionPicker = false
                                 mentionQuery = ""
                             }
-                        } else if showMentionPicker {
-                            showMentionPicker = false
-                            mentionQuery = ""
+                        }
+                        if !newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            onTypingStarted?()
                         }
                     }
-                    if !newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        onTypingStarted?()
-                    }
+                    .accessibilityIdentifier(TestIds.chatMessageInput)
+
+                Button(action: { sendMessage() }) {
+                    Image(systemName: "arrow.up.circle.fill")
+                        .font(.title2)
                 }
-                .onChange(of: selectedPhotoItem) { _, item in
-                    guard let item else { return }
-                    Task {
-                        defer { selectedPhotoItem = nil }
-                        guard let data = try? await item.loadTransferable(type: Data.self) else { return }
-
-                        // Use UTType's preferred extension (covers all image + video types)
-                        let ext = item.supportedContentTypes.first?.preferredFilenameExtension ?? "bin"
-                        let filename = "media.\(ext)"
-
-                        // MIME type left empty — Rust infers from filename extension
-                        let mimeType = ""
-
-                        // Use message text as caption if non-empty
-                        let caption = messageText.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if !caption.isEmpty {
-                            messageText = ""
-                        }
-
-                        onSendMedia?(chatId, data, mimeType, filename, caption)
-                    }
-                }
-                .fileImporter(
-                    isPresented: $showFileImporter,
-                    allowedContentTypes: [.item],
-                    allowsMultipleSelection: false
-                ) { result in
-                    switch result {
-                    case .success(let urls):
-                        guard let url = urls.first else { return }
-                        let didStartAccess = url.startAccessingSecurityScopedResource()
-                        defer { if didStartAccess { url.stopAccessingSecurityScopedResource() } }
-
-                        guard let data = try? Data(contentsOf: url) else { return }
-
-                        let filename = url.lastPathComponent
-
-                        let caption = messageText.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if !caption.isEmpty { messageText = "" }
-
-                        // mime_type empty — Rust infers from filename extension
-                        onSendMedia?(chatId, data, "", filename, caption)
-
-                    case .failure(let error):
-                        print("File import error: \(error.localizedDescription)")
-                    }
-                }
+                .disabled(messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .accessibilityIdentifier(TestIds.chatSend)
             }
-        }
-        .animation(.easeInOut(duration: 0.2), value: voiceRecorder.isRecording)
-        .alert("Microphone Access Denied", isPresented: $showMicPermissionDenied) {
-            Button("Open Settings") {
-                if let url = URL(string: UIApplication.openSettingsURLString) {
-                    UIApplication.shared.open(url)
-                }
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Enable microphone access in Settings to send voice messages.")
-        }
-    }
-
-    private func startVoiceRecording() {
-        Task {
-            let granted = await CallMicrophonePermission.ensureGranted()
-            if granted {
-                voiceRecorder.startRecording()
-            } else {
-                showMicPermissionDenied = true
-            }
+            .modifier(GlassInputModifier())
         }
     }
 }
@@ -882,7 +843,6 @@ private struct QuickReactionBar: View {
 private struct MessageActionCard: View {
     let onCopy: () -> Void
     let onReply: () -> Void
-    var onSaveMedia: (() -> Void)? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -904,17 +864,6 @@ private struct MessageActionCard: View {
             }
             .buttonStyle(.plain)
             .accessibilityIdentifier(TestIds.chatActionCopy)
-
-            if let onSaveMedia {
-                Button {
-                    onSaveMedia()
-                } label: {
-                    Label("Save Photo", systemImage: "square.and.arrow.down")
-                        .font(.body.weight(.medium))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .buttonStyle(.plain)
-            }
         }
         .padding(14)
         .frame(width: 220, alignment: .leading)
@@ -930,58 +879,25 @@ private struct FocusedMessageCard: View {
     let maxWidth: CGFloat
     let maxHeight: CGFloat
 
-    private var hasMedia: Bool { !message.media.isEmpty }
-    private var hasText: Bool {
-        !message.displayContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-
     var body: some View {
-        VStack(alignment: message.isMine ? .trailing : .leading, spacing: 0) {
-            if hasMedia {
-                ForEach(message.media, id: \.originalHashHex) { attachment in
-                    MediaAttachmentView(
-                        attachment: attachment,
-                        isMine: message.isMine,
-                        maxMediaWidth: maxWidth,
-                        maxMediaHeight: maxHeight
-                    )
-                    .overlay(alignment: .bottomTrailing) {
-                        if !hasText {
-                            Text(Date(timeIntervalSince1970: TimeInterval(message.timestamp)).formatted(date: .omitted, time: .shortened))
-                                .font(.caption2)
-                                .foregroundStyle(.white.opacity(0.78))
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
-                                .background(.black.opacity(0.4), in: Capsule())
-                                .padding(6)
-                        }
-                    }
+        VStack(alignment: message.isMine ? .trailing : .leading, spacing: 6) {
+            if isLikelyLongMessage {
+                ScrollView(showsIndicators: false) {
+                    markdownContent
                 }
+                .frame(maxHeight: maxHeight)
+            } else {
+                markdownContent
             }
 
-            if hasText || !hasMedia {
-                VStack(alignment: message.isMine ? .trailing : .leading, spacing: 6) {
-                    if hasText {
-                        if isLikelyLongMessage {
-                            ScrollView(showsIndicators: false) {
-                                markdownContent
-                            }
-                            .frame(maxHeight: maxHeight)
-                        } else {
-                            markdownContent
-                        }
-                    }
-
-                    Text(Date(timeIntervalSince1970: TimeInterval(message.timestamp)).formatted(date: .omitted, time: .shortened))
-                        .font(.caption2)
-                        .foregroundStyle(message.isMine ? Color.white.opacity(0.78) : Color.secondary.opacity(0.9))
-                }
-                .padding(.horizontal, 12)
-                .padding(.top, hasMedia && hasText ? 6 : 8)
-                .padding(.bottom, 6)
-            }
+            Text(Date(timeIntervalSince1970: TimeInterval(message.timestamp)).formatted(date: .omitted, time: .shortened))
+                .font(.caption2)
+                .foregroundStyle(message.isMine ? Color.white.opacity(0.78) : Color.secondary.opacity(0.9))
         }
-        .background(hasMedia && !hasText ? Color.clear : (message.isMine ? Color.blue : Color(uiColor: .systemGray5)))
+        .padding(.horizontal, 12)
+        .padding(.top, 8)
+        .padding(.bottom, 6)
+        .background(message.isMine ? Color.blue : Color(uiColor: .systemGray5))
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .frame(maxWidth: maxWidth, alignment: message.isMine ? .trailing : .leading)
     }
@@ -996,6 +912,44 @@ private struct FocusedMessageCard: View {
     private var isLikelyLongMessage: Bool {
         let lineCount = message.displayContent.split(whereSeparator: \.isNewline).count
         return message.displayContent.count > 240 || lineCount > 6
+    }
+}
+
+private struct ReactionChips: View {
+    let reactions: [ReactionSummary]
+    let messageId: String
+    var onReact: ((String, String) -> Void)?
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(reactions, id: \.emoji) { reaction in
+                Button {
+                    onReact?(messageId, reaction.emoji)
+                } label: {
+                    HStack(spacing: 2) {
+                        Text(reaction.emoji)
+                            .font(.system(size: 13))
+                        if reaction.count > 1 {
+                            Text("\(reaction.count)")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(reaction.reactedByMe ? .white : .primary)
+                        }
+                    }
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(
+                        reaction.reactedByMe
+                            ? Color.blue.opacity(0.85)
+                            : Color(uiColor: .systemGray5)
+                    )
+                    .clipShape(Capsule())
+                    .overlay(
+                        Capsule().strokeBorder(Color(uiColor: .systemBackground), lineWidth: 1.5)
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+        }
     }
 }
 
@@ -1063,10 +1017,56 @@ private struct EmojiPickerSheet: View {
     }
 }
 
+private struct NewMessagesDividerRow: View {
+    var body: some View {
+        HStack(spacing: 10) {
+            Rectangle()
+                .fill(Color.blue.opacity(0.35))
+                .frame(height: 0.5)
+            Text("NEW MESSAGES")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.blue.opacity(0.8))
+                .fixedSize()
+            Rectangle()
+                .fill(Color.blue.opacity(0.35))
+                .frame(height: 0.5)
+        }
+        .padding(.vertical, 10)
+        .padding(.horizontal, 4)
+        .id("unread-divider")
+    }
+}
+
 private struct BottomVisibleKey: PreferenceKey {
     static var defaultValue: CGFloat? = nil
     static func reduce(value: inout CGFloat?, nextValue: () -> CGFloat?) {
         value = nextValue() ?? value
+    }
+}
+
+private struct GlassInputModifier: ViewModifier {
+    func body(content: Content) -> some View {
+        #if compiler(>=6.2)
+        if #available(iOS 26.0, *) {
+            content
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .glassEffect(.regular.interactive(), in: RoundedRectangle(cornerRadius: 20))
+                .padding(12)
+        } else {
+            content
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20))
+                .padding(12)
+        }
+        #else
+        content
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20))
+            .padding(12)
+        #endif
     }
 }
 
@@ -1096,12 +1096,781 @@ private struct FloatingInputBarModifier<Bar: View>: ViewModifier {
     }
 }
 
-// Extracted to MessageBubbleViews.swift:
-// PikaPrompt, MessageSegment, parseMessageSegments,
-// GroupedChatMessage, GroupedBubblePosition,
-// MessageGroupRow, MessageBubbleStack, MessageBubble,
-// MediaAttachmentView, ReplyPreviewCard, deliveryText,
-// PikaPromptView, PikaHtmlView, PikaWebView, Theme extensions
+// MARK: - Pika-prompt model
+
+private struct PikaPrompt: Decodable {
+    let title: String
+    let options: [String]
+}
+
+/// Parses message content into segments: plain markdown text and pika-* code blocks.
+private enum MessageSegment: Identifiable {
+    case markdown(String)
+    case pikaPrompt(PikaPrompt)
+    case pikaHtml(id: String?, html: String, state: String?)
+
+    var id: String {
+        switch self {
+        case .markdown(let text): return "md-\(text.hashValue)"
+        case .pikaPrompt(let prompt): return "prompt-\(prompt.title.hashValue)"
+        case .pikaHtml(let id, let html, _):
+            if let id { return "html-\(id)" }
+            return "html-\(html.hashValue)"
+        }
+    }
+}
+
+private func parseMessageSegments(_ content: String, htmlState: String? = nil) -> [MessageSegment] {
+    var segments: [MessageSegment] = []
+    let pattern = /```pika-([\w-]+)(?:[ \t]+(\S+))?\n([\s\S]*?)```/
+    var remaining = content[...]
+
+    while let match = remaining.firstMatch(of: pattern) {
+        let before = String(remaining[remaining.startIndex..<match.range.lowerBound])
+        if !before.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            segments.append(.markdown(before))
+        }
+
+        let blockType = String(match.output.1)
+        let blockId = match.output.2.map(String.init)
+        let blockBody = String(match.output.3).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        switch blockType {
+        case "prompt":
+            if let data = blockBody.data(using: .utf8),
+               let prompt = try? JSONDecoder().decode(PikaPrompt.self, from: data) {
+                segments.append(.pikaPrompt(prompt))
+            }
+        case "html":
+            segments.append(.pikaHtml(id: blockId, html: blockBody, state: htmlState))
+        case "html-update", "html-state-update", "prompt-response":
+            break // Consumed by Rust core; silently drop if one slips through.
+        default:
+            segments.append(.markdown("```\(blockType)\n\(blockBody)\n```"))
+        }
+
+        remaining = remaining[match.range.upperBound...]
+    }
+
+    let tail = String(remaining)
+    if !tail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        segments.append(.markdown(tail))
+    }
+
+    return segments
+}
+
+// MARK: - Message grouping
+
+private struct GroupedChatMessage: Identifiable {
+    let senderPubkey: String
+    let senderName: String?
+    let senderNpub: String
+    let senderPictureUrl: String?
+    let isMine: Bool
+    var messages: [ChatMessage]
+
+    var id: String { messages.first?.id ?? senderPubkey }
+}
+
+private enum GroupedBubblePosition {
+    case single
+    case first
+    case middle
+    case last
+}
+
+private struct MessageGroupRow: View {
+    let group: GroupedChatMessage
+    var showSender: Bool = false
+    let onSendMessage: @MainActor (String, String?) -> Void
+    let replyTargetsById: [String: ChatMessage]
+    var onTapSender: (@MainActor (String) -> Void)?
+    var onJumpToMessage: ((String) -> Void)? = nil
+    var onReact: ((String, String) -> Void)?
+    @Binding var activeReactionMessageId: String?
+    var onLongPressMessage: ((ChatMessage) -> Void)? = nil
+
+    private let avatarSize: CGFloat = 24
+    private let avatarGutterWidth: CGFloat = 28
+
+    var body: some View {
+        Group {
+            if group.isMine {
+                outgoingRow
+            } else {
+                incomingRow
+            }
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private var incomingRow: some View {
+        HStack(alignment: .bottom, spacing: 8) {
+            AvatarView(
+                name: group.senderName,
+                npub: group.senderNpub,
+                pictureUrl: group.senderPictureUrl,
+                size: avatarSize
+            )
+            .frame(width: avatarGutterWidth, alignment: .leading)
+            .accessibilityHidden(true)
+            .onTapGesture { onTapSender?(group.senderPubkey) }
+
+            VStack(alignment: .leading, spacing: 3) {
+                if showSender {
+                    Text(displaySenderName)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .onTapGesture { onTapSender?(group.senderPubkey) }
+                }
+                MessageBubbleStack(
+                    group: group,
+                    onSendMessage: onSendMessage,
+                    replyTargetsById: replyTargetsById,
+                    onReact: onReact,
+                    onJumpToMessage: onJumpToMessage,
+                    activeReactionMessageId: $activeReactionMessageId,
+                    onLongPressMessage: onLongPressMessage
+                )
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            Spacer(minLength: 24)
+        }
+    }
+
+    private var outgoingRow: some View {
+        HStack(alignment: .bottom, spacing: 8) {
+            Spacer(minLength: 48)
+
+            VStack(alignment: .trailing, spacing: 3) {
+                MessageBubbleStack(
+                    group: group,
+                    onSendMessage: onSendMessage,
+                    replyTargetsById: replyTargetsById,
+                    onReact: onReact,
+                    onJumpToMessage: onJumpToMessage,
+                    activeReactionMessageId: $activeReactionMessageId,
+                    onLongPressMessage: onLongPressMessage
+                )
+                if let delivery = group.messages.last?.delivery {
+                    Text(deliveryText(delivery))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .trailing)
+        }
+    }
+
+    private var displaySenderName: String {
+        if let name = group.senderName, !name.isEmpty {
+            return name
+        }
+        if group.senderNpub.count <= 12 { return group.senderNpub }
+        return String(group.senderNpub.prefix(12)) + "..."
+    }
+}
+
+private struct MessageBubbleStack: View {
+    let group: GroupedChatMessage
+    let onSendMessage: @MainActor (String, String?) -> Void
+    let replyTargetsById: [String: ChatMessage]
+    var onReact: ((String, String) -> Void)?
+    var onJumpToMessage: ((String) -> Void)? = nil
+    @Binding var activeReactionMessageId: String?
+    var onLongPressMessage: ((ChatMessage) -> Void)? = nil
+
+    var body: some View {
+        VStack(alignment: group.isMine ? .trailing : .leading, spacing: 2) {
+            ForEach(Array(group.messages.enumerated()), id: \.element.id) { index, message in
+                MessageBubble(
+                    message: message,
+                    position: bubblePosition(at: index, count: group.messages.count),
+                    onSendMessage: onSendMessage,
+                    replyTargetsById: replyTargetsById,
+                    onReact: onReact,
+                    onJumpToMessage: onJumpToMessage,
+                    activeReactionMessageId: $activeReactionMessageId,
+                    onLongPressMessage: onLongPressMessage
+                )
+                .id(message.id)
+            }
+        }
+    }
+
+    private func bubblePosition(at index: Int, count: Int) -> GroupedBubblePosition {
+        guard count > 1 else { return .single }
+        if index == 0 { return .first }
+        if index == count - 1 { return .last }
+        return .middle
+    }
+}
+
+private struct MessageBubble: View {
+    let message: ChatMessage
+    let position: GroupedBubblePosition
+    let onSendMessage: @MainActor (String, String?) -> Void
+    let replyTargetsById: [String: ChatMessage]
+    var onReact: ((String, String) -> Void)?
+    var onJumpToMessage: ((String) -> Void)? = nil
+    @Binding var activeReactionMessageId: String?
+    var onLongPressMessage: ((ChatMessage) -> Void)? = nil
+
+    private let roundedCornerRadius: CGFloat = 16
+    private let groupedCornerRadius: CGFloat = 6
+
+    private let reactionChipOverlap: CGFloat = 10
+
+    var body: some View {
+        let hasReactions = !message.reactions.isEmpty
+        let segments = parseMessageSegments(message.displayContent, htmlState: message.htmlState)
+
+        VStack(alignment: message.isMine ? .trailing : .leading, spacing: 0) {
+            if let replyToId = message.replyToMessageId {
+                ReplyPreviewCard(
+                    replyToMessageId: replyToId,
+                    target: replyTargetsById[replyToId],
+                    isMine: message.isMine,
+                    onTap: onJumpToMessage
+                )
+                .padding(.bottom, 3)
+            }
+
+            ForEach(segments) { segment in
+                switch segment {
+                case .markdown(let text):
+                    markdownBubble(text: text)
+                case .pikaPrompt(let prompt):
+                    PikaPromptView(prompt: prompt, message: message, onSelect: {
+                        onSendMessage($0, nil)
+                    })
+                case .pikaHtml(_, let html, let state):
+                    PikaHtmlView(html: html, htmlState: state, onSendMessage: {
+                        onSendMessage($0, nil)
+                    })
+                }
+            }
+            .overlay(alignment: message.isMine ? .bottomLeading : .bottomTrailing) {
+                if hasReactions {
+                    ReactionChips(
+                        reactions: message.reactions,
+                        messageId: message.id,
+                        onReact: onReact
+                    )
+                    .offset(x: message.isMine ? -12 : 12, y: reactionChipOverlap)
+                }
+            }
+
+            if hasReactions {
+                Spacer().frame(height: reactionChipOverlap + 4)
+            }
+        }
+        .contentShape(Rectangle())
+        .onLongPressGesture(minimumDuration: 0.4, maximumDistance: 44) {
+            handleLongPress()
+        }
+        .opacity(activeReactionMessageId == message.id ? 0 : 1)
+        .animation(.easeInOut(duration: 0.15), value: activeReactionMessageId == message.id)
+    }
+
+    private func markdownBubble(text: String) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Markdown(text)
+                .markdownTheme(message.isMine ? .pikaOutgoing : .pikaIncoming)
+                .multilineTextAlignment(.leading)
+                .textSelection(.enabled)
+
+            Text(timestampText)
+                .font(.caption2)
+                .foregroundStyle(message.isMine ? Color.white.opacity(0.78) : Color.secondary.opacity(0.9))
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 8)
+        .padding(.bottom, 6)
+        .background(message.isMine ? Color.blue : Color.gray.opacity(0.2))
+        .clipShape(UnevenRoundedRectangle(cornerRadii: bubbleRadii, style: .continuous))
+    }
+
+    private var timestampText: String {
+        Date(timeIntervalSince1970: TimeInterval(message.timestamp))
+            .formatted(date: .omitted, time: .shortened)
+    }
+
+    private var bubbleRadii: RectangleCornerRadii {
+        if message.isMine {
+            return .init(
+                topLeading: roundedCornerRadius,
+                bottomLeading: roundedCornerRadius,
+                bottomTrailing: tailRadius(for: .bottom),
+                topTrailing: tailRadius(for: .top)
+            )
+        }
+        return .init(
+            topLeading: tailRadius(for: .top),
+            bottomLeading: tailRadius(for: .bottom),
+            bottomTrailing: roundedCornerRadius,
+            topTrailing: roundedCornerRadius
+        )
+    }
+
+    private enum TailEdge {
+        case top
+        case bottom
+    }
+
+    private func tailRadius(for edge: TailEdge) -> CGFloat {
+        switch (position, edge) {
+        case (.single, _):
+            return roundedCornerRadius
+        case (.first, .top):
+            return roundedCornerRadius
+        case (.first, .bottom):
+            return groupedCornerRadius
+        case (.middle, _):
+            return groupedCornerRadius
+        case (.last, .top):
+            return groupedCornerRadius
+        case (.last, .bottom):
+            return roundedCornerRadius
+        }
+    }
+
+    private func handleLongPress() {
+        guard onLongPressMessage != nil else { return }
+        let impactFeedback = UIImpactFeedbackGenerator(style: .medium)
+        impactFeedback.impactOccurred()
+        onLongPressMessage?(message)
+    }
+}
+
+private struct ReplyPreviewCard: View {
+    let replyToMessageId: String
+    let target: ChatMessage?
+    let isMine: Bool
+    var onTap: ((String) -> Void)? = nil
+
+    var body: some View {
+        Group {
+            if target != nil {
+                Button {
+                    onTap?(replyToMessageId)
+                } label: {
+                    content
+                }
+                .buttonStyle(.plain)
+            } else {
+                content
+            }
+        }
+    }
+
+    private var content: some View {
+        HStack(spacing: 8) {
+            Rectangle()
+                .fill(isMine ? Color.white.opacity(0.8) : Color.blue.opacity(0.9))
+                .frame(width: 2)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(senderLabel)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(isMine ? Color.white.opacity(0.86) : Color.secondary)
+                    .lineLimit(1)
+                Text(snippet)
+                    .font(.caption)
+                    .foregroundStyle(isMine ? Color.white.opacity(0.8) : Color.secondary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(
+            isMine ? Color.white.opacity(0.14) : Color.black.opacity(0.08),
+            in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+        )
+    }
+
+    private var senderLabel: String {
+        guard let target else { return "Original message" }
+        if target.isMine {
+            return "You"
+        }
+        if let name = target.senderName, !name.isEmpty {
+            return name
+        }
+        return String(target.senderPubkey.prefix(8))
+    }
+
+    private var snippet: String {
+        guard let target else { return "Original message not loaded" }
+        let trimmed = target.displayContent.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            return "(empty message)"
+        }
+        if let first = trimmed.split(separator: "\n").first {
+            let text = String(first)
+            if text.count > 80 {
+                return String(text.prefix(80)) + "…"
+            }
+            return text
+        }
+        if trimmed.count > 80 {
+            return String(trimmed.prefix(80)) + "…"
+        }
+        return trimmed
+    }
+}
+
+private func deliveryText(_ d: MessageDeliveryState) -> String {
+    switch d {
+    case .pending: return "Pending"
+    case .sent: return "Sent"
+    case .failed(let reason): return "Failed: \(reason)"
+    }
+}
+
+// MARK: - Pika prompt view
+
+private struct PikaPromptView: View {
+    let prompt: PikaPrompt
+    let message: ChatMessage
+    let onSelect: @MainActor (String) -> Void
+
+    private var hasVoted: Bool { message.myPollVote != nil }
+    private var hasTallies: Bool { !message.pollTally.isEmpty }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(prompt.title)
+                .font(.subheadline.weight(.semibold))
+            ForEach(prompt.options, id: \.self) { option in
+                let tally = message.pollTally.first(where: { $0.option == option })
+                let isMyVote = message.myPollVote == option
+                Button {
+                    let response = """
+                    ```pika-prompt-response
+                    {"prompt_id":"\(message.id)","selected":"\(option)"}
+                    ```
+                    """
+                    onSelect(response)
+                } label: {
+                    HStack {
+                        Text(option)
+                        Spacer()
+                        if let tally {
+                            Text("\(tally.count)")
+                                .font(.subheadline.weight(.semibold))
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(isMyVote ? Color.blue.opacity(0.25) : Color.blue.opacity(0.1))
+                    .foregroundStyle(Color.blue)
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10)
+                            .strokeBorder(isMyVote ? Color.blue : Color.clear, lineWidth: 1.5)
+                    )
+                }
+                .disabled(hasVoted)
+                if let tally, !tally.voterNames.isEmpty {
+                    Text(tally.voterNames.joined(separator: ", "))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .padding(.leading, 12)
+                }
+            }
+        }
+        .padding(12)
+        .background(Color.gray.opacity(0.1))
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+    }
+}
+
+// MARK: - Pika HTML view
+
+private struct PikaHtmlView: View {
+    let html: String
+    let htmlState: String?
+    let onSendMessage: @MainActor (String) -> Void
+
+    @State private var contentHeight: CGFloat = 100
+    @State private var showFullScreen = false
+
+    var body: some View {
+        PikaWebView(html: html, htmlState: htmlState, contentHeight: $contentHeight, onSendMessage: onSendMessage, interactive: false)
+            .frame(height: min(contentHeight, 400))
+            .clipShape(RoundedRectangle(cornerRadius: 16))
+            .background(Color.gray.opacity(0.1))
+            .clipShape(RoundedRectangle(cornerRadius: 16))
+            .contentShape(Rectangle())
+            .onTapGesture { showFullScreen = true }
+            .fullScreenCover(isPresented: $showFullScreen) {
+                PikaHtmlFullScreen(html: html, htmlState: htmlState, onSendMessage: onSendMessage, isPresented: $showFullScreen)
+            }
+    }
+}
+
+private struct PikaHtmlFullScreen: View {
+    let html: String
+    let htmlState: String?
+    let onSendMessage: @MainActor (String) -> Void
+    @Binding var isPresented: Bool
+
+    var body: some View {
+        NavigationStack {
+            PikaFullScreenWebView(html: html, htmlState: htmlState, onSendMessage: onSendMessage)
+                .navigationTitle("HTML")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button("Done") { isPresented = false }
+                    }
+                }
+        }
+    }
+}
+
+private struct PikaFullScreenWebView: UIViewRepresentable {
+    let html: String
+    let htmlState: String?
+    let onSendMessage: @MainActor (String) -> Void
+
+    func makeCoordinator() -> PikaWebView.Coordinator {
+        PikaWebView.Coordinator(onSendMessage: onSendMessage)
+    }
+
+    func makeUIView(context: Context) -> WKWebView {
+        let config = WKWebViewConfiguration()
+        let userContentController = WKUserContentController()
+        userContentController.add(context.coordinator, name: "pikaSend")
+
+        let bridgeScript = WKUserScript(
+            source: "window.pika = { send: function(text) { window.webkit.messageHandlers.pikaSend.postMessage(text); } };",
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true
+        )
+        userContentController.addUserScript(bridgeScript)
+        config.userContentController = userContentController
+
+        let webView = WKWebView(frame: .zero, configuration: config)
+        webView.isOpaque = false
+        webView.backgroundColor = .clear
+        webView.navigationDelegate = context.coordinator
+
+        if let state = htmlState {
+            context.coordinator.pendingState = state
+        }
+
+        let finalHtml: String
+        let trimmed = html.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("<!") || trimmed.lowercased().hasPrefix("<html") {
+            finalHtml = html
+        } else {
+            finalHtml = """
+            <!DOCTYPE html>
+            <html>
+            <head>
+            <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+            <style>
+            :root { color-scheme: light dark; }
+            body { margin: 8px; font-family: -apple-system, sans-serif; background: transparent; }
+            </style>
+            </head>
+            <body>\(html)</body>
+            </html>
+            """
+        }
+        webView.loadHTMLString(finalHtml, baseURL: webViewBaseURL)
+        return webView
+    }
+
+    func updateUIView(_ webView: WKWebView, context: Context) {
+        guard let state = htmlState, state != context.coordinator.lastInjectedState else { return }
+        if !context.coordinator.pageLoaded {
+            context.coordinator.pendingState = state
+            return
+        }
+        context.coordinator.lastInjectedState = state
+        let escaped = state.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "'", with: "\\'")
+            .replacingOccurrences(of: "\n", with: "\\n")
+        webView.evaluateJavaScript("window.pikaState && window.pikaState(JSON.parse('\(escaped)'))")
+    }
+}
+
+private struct PikaWebView: UIViewRepresentable {
+    let html: String
+    let htmlState: String?
+    @Binding var contentHeight: CGFloat
+    let onSendMessage: @MainActor (String) -> Void
+    var interactive: Bool = true
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onSendMessage: onSendMessage)
+    }
+
+    func makeUIView(context: Context) -> WKWebView {
+        let config = WKWebViewConfiguration()
+        let userContentController = WKUserContentController()
+        userContentController.add(context.coordinator, name: "pikaSend")
+
+        let bridgeScript = WKUserScript(
+            source: "window.pika = { send: function(text) { window.webkit.messageHandlers.pikaSend.postMessage(text); } };",
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true
+        )
+        userContentController.addUserScript(bridgeScript)
+        config.userContentController = userContentController
+
+        let webView = WKWebView(frame: .zero, configuration: config)
+        webView.isOpaque = false
+        webView.backgroundColor = .clear
+        webView.scrollView.backgroundColor = .clear
+        webView.scrollView.isScrollEnabled = false
+        webView.isUserInteractionEnabled = interactive
+        webView.navigationDelegate = context.coordinator
+
+        if let state = htmlState {
+            context.coordinator.pendingState = state
+        }
+
+        let binding = $contentHeight
+        context.coordinator.onHeightChange = { height in
+            Task { @MainActor in
+                binding.wrappedValue = height
+            }
+        }
+        let debugOverlay = """
+        <div id="_pika_dbg" style="display:none;position:fixed;top:0;left:0;right:0;padding:4px 8px;font:16px monospace;color:#f44;background:rgba(0,0,0,0.8);z-index:99999;pointer-events:none"></div>
+        <script>
+        var _d=document.getElementById('_pika_dbg');
+        window.onerror=function(m,u,l){_d.style.display='block';_d.textContent='ERR: '+m+' ('+u+':'+l+')';};
+        window.addEventListener('unhandledrejection',function(e){_d.style.display='block';_d.textContent='REJECT: '+e.reason;});
+        </script>
+        """
+        let finalHtml: String
+        let trimmed = html.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("<!") || trimmed.lowercased().hasPrefix("<html") {
+            if let range = html.range(of: "</body>", options: .caseInsensitive) {
+                finalHtml = html[html.startIndex..<range.lowerBound] + debugOverlay + html[range.lowerBound...]
+            } else {
+                finalHtml = html + debugOverlay
+            }
+        } else {
+            finalHtml = """
+            <!DOCTYPE html>
+            <html>
+            <head>
+            <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+            <style>
+            :root { color-scheme: light dark; }
+            body { margin: 8px; font-family: -apple-system, sans-serif; background: transparent; }
+            </style>
+            </head>
+            <body>\(html)\(debugOverlay)</body>
+            </html>
+            """
+        }
+        webView.loadHTMLString(finalHtml, baseURL: webViewBaseURL)
+        return webView
+    }
+
+    func updateUIView(_ webView: WKWebView, context: Context) {
+        guard let state = htmlState, state != context.coordinator.lastInjectedState else { return }
+        if !context.coordinator.pageLoaded {
+            // Page still loading — stash for didFinish to inject.
+            context.coordinator.pendingState = state
+            return
+        }
+        context.coordinator.lastInjectedState = state
+        let escaped = state.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "'", with: "\\'")
+            .replacingOccurrences(of: "\n", with: "\\n")
+        webView.evaluateJavaScript("window.pikaState && window.pikaState(JSON.parse('\(escaped)'))")
+    }
+
+    class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
+        let onSendMessage: @MainActor (String) -> Void
+        var onHeightChange: ((CGFloat) -> Void)?
+        var lastInjectedState: String?
+        var pendingState: String?
+        var pageLoaded = false
+
+        init(onSendMessage: @escaping @MainActor (String) -> Void) {
+            self.onSendMessage = onSendMessage
+        }
+
+        func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            switch message.name {
+            case "pikaSend":
+                if let text = message.body as? String {
+                    Task { @MainActor in
+                        onSendMessage(text)
+                    }
+                }
+            default:
+                break
+            }
+        }
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            pageLoaded = true
+            // Measure content height once after load to size the frame without
+            // a continuous observer that causes layout feedback loops.
+            webView.evaluateJavaScript("document.documentElement.scrollHeight") { [weak self] result, _ in
+                if let height = result as? CGFloat, height > 0 {
+                    self?.onHeightChange?(height)
+                }
+            }
+            // Inject pending state after initial page load (handles case where
+            // updateUIView fires before the page is ready).
+            if let state = pendingState {
+                pendingState = nil
+                lastInjectedState = state
+                let escaped = state.replacingOccurrences(of: "\\", with: "\\\\")
+                    .replacingOccurrences(of: "'", with: "\\'")
+                    .replacingOccurrences(of: "\n", with: "\\n")
+                webView.evaluateJavaScript("window.pikaState && window.pikaState(JSON.parse('\(escaped)'))")
+            }
+        }
+
+        func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            if navigationAction.navigationType == .linkActivated {
+                decisionHandler(.cancel)
+            } else {
+                decisionHandler(.allow)
+            }
+        }
+    }
+}
+
+// MARK: - Markdown themes
+
+extension Theme {
+    static let pikaOutgoing = Theme()
+        .text { ForegroundColor(.white) }
+        .link { ForegroundColor(.white.opacity(0.9)) }
+        .strong { ForegroundColor(.white) }
+        .code { ForegroundColor(.white.opacity(0.9)) }
+        .codeBlock { configuration in
+            configuration.label
+                .padding(8)
+                .background(Color.white.opacity(0.15))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+
+    static let pikaIncoming = Theme()
+        .text { ForegroundColor(.primary) }
+        .codeBlock { configuration in
+            configuration.label
+                .padding(8)
+                .background(Color.gray.opacity(0.15))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+}
 
 #if DEBUG
 private enum ChatViewPreviewData {
@@ -1124,7 +1893,6 @@ private enum ChatViewPreviewData {
                 isMine: false,
                 delivery: .sent,
                 reactions: [],
-                media: [],
                 pollTally: [],
                 myPollVote: nil,
                 htmlState: nil
@@ -1141,7 +1909,6 @@ private enum ChatViewPreviewData {
                 isMine: false,
                 delivery: .sent,
                 reactions: [],
-                media: [],
                 pollTally: [],
                 myPollVote: nil,
                 htmlState: nil
@@ -1168,7 +1935,6 @@ private enum ChatViewPreviewData {
                 isMine: true,
                 delivery: .sent,
                 reactions: [],
-                media: [],
                 pollTally: [],
                 myPollVote: nil,
                 htmlState: nil
@@ -1185,7 +1951,6 @@ private enum ChatViewPreviewData {
                 isMine: true,
                 delivery: .pending,
                 reactions: [],
-                media: [],
                 pollTally: [],
                 myPollVote: nil,
                 htmlState: nil
@@ -1265,24 +2030,6 @@ private enum ChatViewPreviewData {
             onStartCall: {},
             onStartVideoCall: {},
             onOpenCallScreen: {}
-        )
-    }
-}
-
-#Preview("Chat - Media") {
-    NavigationStack {
-        ChatView(
-            chatId: "chat-media",
-            state: ChatScreenState(chat: PreviewAppState.chatDetailMedia.currentChat),
-            activeCall: nil,
-            callEvents: [],
-            onSendMessage: { _, _ in },
-            onStartCall: {},
-            onStartVideoCall: {},
-            onOpenCallScreen: {},
-            onDownloadMedia: { chatId, messageId, hash in
-                print("Download: \(chatId)/\(messageId)/\(hash)")
-            }
         )
     }
 }
