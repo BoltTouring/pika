@@ -1,5 +1,7 @@
 # Marmot Follow-Ups Plan (Single Source of Truth)
 
+Status: in progress (active queue)
+
 ## Scope
 This replaces and supersedes:
 - `marmot-refactor-plan.md`
