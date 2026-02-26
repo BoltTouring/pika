@@ -69,10 +69,11 @@ fun FileAttachmentRow(
             )
         }
 
-        if (attachment.localPath != null) {
+        val localPath = attachment.localPath
+        if (localPath != null) {
             IconButton(
                 onClick = {
-                    val file = File(attachment.localPath)
+                    val file = File(localPath)
                     val uri = FileProvider.getUriForFile(ctx, "${ctx.packageName}.provider", file)
                     val intent = Intent(Intent.ACTION_SEND).apply {
                         type = attachment.mimeType

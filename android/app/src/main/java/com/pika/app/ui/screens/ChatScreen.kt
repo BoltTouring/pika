@@ -721,13 +721,14 @@ private fun MessageBubble(
 
     // ── Fullscreen image overlay ───────────────────────────────────────────
     fullscreenAttachment?.let { att ->
-        if (att.localPath != null) {
+        val path = att.localPath
+        if (path != null) {
             Dialog(
                 onDismissRequest = { fullscreenAttachment = null },
                 properties = DialogProperties(usePlatformDefaultWidth = false),
             ) {
                 FullscreenImageViewer(
-                    localPath = att.localPath,
+                    localPath = path,
                     filename = att.filename,
                     onDismiss = { fullscreenAttachment = null },
                 )
@@ -755,7 +756,8 @@ private fun ImageAttachmentBubble(
     onDownload: () -> Unit,
 ) {
     val shape = RoundedCornerShape(14.dp)
-    if (attachment.localPath != null) {
+    val localPath = attachment.localPath
+    if (localPath != null) {
         Box(
             modifier = Modifier
                 .clip(shape)
@@ -763,7 +765,7 @@ private fun ImageAttachmentBubble(
                 .widthIn(max = 240.dp),
         ) {
             AsyncImage(
-                model = File(attachment.localPath),
+                model = File(localPath),
                 contentDescription = attachment.filename,
                 modifier = Modifier
                     .widthIn(max = 240.dp)

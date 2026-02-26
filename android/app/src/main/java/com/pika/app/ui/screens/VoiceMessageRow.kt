@@ -54,7 +54,8 @@ fun VoiceMessageRow(
 ) {
     val textColor = if (isMine) Color.White else MaterialTheme.colorScheme.onSurfaceVariant
 
-    if (attachment.localPath == null) {
+    val localPath = attachment.localPath
+    if (localPath == null) {
         NotDownloadedRow(attachment = attachment, isMine = isMine, textColor = textColor, onDownload = onDownload)
         return
     }
@@ -65,9 +66,9 @@ fun VoiceMessageRow(
     var durationMs by remember { mutableLongStateOf(0L) }
     val player = remember { MediaPlayer() }
 
-    DisposableEffect(attachment.localPath) {
+    DisposableEffect(localPath) {
         runCatching {
-            player.setDataSource(attachment.localPath)
+            player.setDataSource(localPath)
             player.prepare()
             durationMs = player.duration.toLong().coerceAtLeast(0L)
         }
