@@ -63,6 +63,7 @@ fun MyProfileSheet(
     manager: AppManager,
     npub: String,
     onDismiss: () -> Unit,
+    onOpenNotifications: () -> Unit = {},
 ) {
     val ctx = LocalContext.current
     val clipboard = LocalClipboardManager.current
@@ -334,6 +335,18 @@ fun MyProfileSheet(
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                }
+            }
+
+            // Notifications
+            item {
+                HorizontalDivider()
+                Spacer(Modifier.height(4.dp))
+                OutlinedButton(
+                    onClick = onOpenNotifications,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Notifications")
                 }
             }
 

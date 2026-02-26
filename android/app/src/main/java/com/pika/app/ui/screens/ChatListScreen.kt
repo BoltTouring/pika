@@ -1,33 +1,48 @@
 package com.pika.app.ui.screens
 
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Archive
+import androidx.compose.material.icons.filled.GroupAdd
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SwipeToDismissBox
+import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
-import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -37,15 +52,12 @@ import com.pika.app.rust.AuthState
 import com.pika.app.rust.ChatSummary
 import com.pika.app.rust.Screen
 import com.pika.app.ui.Avatar
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.GroupAdd
-import androidx.compose.material.icons.filled.Person
 
 @Composable
 @OptIn(ExperimentalMaterial3Api::class)
 fun ChatListScreen(manager: AppManager, padding: PaddingValues) {
     var showMyProfile by remember { mutableStateOf(false) }
+    var showNotificationSettings by remember { mutableStateOf(false) }
     val (myNpub, myPubkey) =
         when (val a = manager.state.auth) {
             is AuthState.LoggedIn -> a.npub to a.pubkey
@@ -82,13 +94,23 @@ fun ChatListScreen(manager: AppManager, padding: PaddingValues) {
             contentPadding = PaddingValues(vertical = 6.dp),
         ) {
             items(manager.state.chatList, key = { it.chatId }) { chat ->
-                ChatRow(
+                ArchivableChat(
                     chat = chat,
                     selfPubkey = myPubkey,
                     onClick = { manager.dispatch(AppAction.OpenChat(chat.chatId)) },
+                    onArchive = { manager.dispatch(AppAction.ArchiveChat(chat.chatId)) },
                 )
             }
         }
+    }
+
+    if (showNotificationSettings) {
+        NotificationSettingsScreen(
+            manager = manager,
+            padding = padding,
+            onBack = { showNotificationSettings = false },
+        )
+        return
     }
 
     if (showMyProfile && myNpub != null) {
@@ -96,6 +118,10 @@ fun ChatListScreen(manager: AppManager, padding: PaddingValues) {
             manager = manager,
             npub = myNpub,
             onDismiss = { showMyProfile = false },
+            onOpenNotifications = {
+                showMyProfile = false
+                showNotificationSettings = true
+            },
         )
     }
 }
@@ -147,6 +173,72 @@ private fun ChatRow(chat: ChatSummary, selfPubkey: String?, onClick: () -> Unit)
             )
         }
     }
+}
+
+/**
+ * Wraps [ChatRow] in a SwipeToDismissBox so the user can swipe right to archive a chat.
+ * Mirrors the iOS chat list archive gesture.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ArchivableChat(
+    chat: ChatSummary,
+    selfPubkey: String?,
+    onClick: () -> Unit,
+    onArchive: () -> Unit,
+) {
+    val dismissState = rememberSwipeToDismissBoxState(
+        confirmValueChange = { value ->
+            if (value == SwipeToDismissBoxValue.StartToEnd) {
+                onArchive()
+                true
+            } else {
+                false
+            }
+        },
+    )
+
+    // Reset after archive so the item animates out naturally via the list key mechanism
+    LaunchedEffect(dismissState.currentValue) {
+        if (dismissState.currentValue == SwipeToDismissBoxValue.StartToEnd) {
+            dismissState.reset()
+        }
+    }
+
+    SwipeToDismissBox(
+        state = dismissState,
+        enableDismissFromStartToEnd = true,
+        enableDismissFromEndToStart = false,
+        backgroundContent = {
+            val progress = dismissState.progress
+            val color by animateColorAsState(
+                targetValue = if (progress > 0.3f) MaterialTheme.colorScheme.primaryContainer
+                else MaterialTheme.colorScheme.surfaceVariant,
+                label = "archive_bg",
+            )
+            val scale by animateFloatAsState(
+                targetValue = if (progress > 0.3f) 1f else 0.75f,
+                label = "archive_icon_scale",
+            )
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(color)
+                    .padding(start = 20.dp),
+                contentAlignment = Alignment.CenterStart,
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Archive,
+                    contentDescription = "Archive",
+                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                    modifier = Modifier.scale(scale),
+                )
+            }
+        },
+        content = {
+            ChatRow(chat = chat, selfPubkey = selfPubkey, onClick = onClick)
+        },
+    )
 }
 
 private fun chatTitle(chat: ChatSummary, selfPubkey: String?): String {
